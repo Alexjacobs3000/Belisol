@@ -28,10 +28,16 @@ except ImportError:
     _PIL_BESCHIKBAAR = False
 
 # ── Font voor maataanduidingen in tekeningen ──────────────────────────────────
-_MAAT_FONT = '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'
+_MAAT_FONT_KANDIDATEN = [
+    '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',   # Ubuntu/Debian
+    '/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf',        # Fedora/RHEL
+    '/System/Library/Fonts/Helvetica.ttc',                                 # macOS
+    '/Library/Fonts/Arial.ttf',                                            # macOS (Office)
+]
+_MAAT_FONT = next((f for f in _MAAT_FONT_KANDIDATEN if Path(f).exists()), None)
 
 # ── Pad naar het blanco voorblad-template ──────────────────────────────────────
-VOORBLAD_TEMPLATE = Path(__file__).parent / 'Bestelbon PVC CERTIX voorblad (1).pdf'
+VOORBLAD_TEMPLATE = Path(__file__).parent / 'voorblad_template.pdf'
 
 # ── UniColor kleurposities (y-coördinaat van elke kleuroptie) ─────────────────
 UNICOLOR_Y = {
@@ -435,8 +441,12 @@ def vul_voorblad(header: dict, spec: dict) -> fitz.Document:
     return doc
 
 
-def process_volgblad(page: fitz.Page) -> None:
-    """Wist Vak B en herplaatst de relevante regels (zonder technische trefwoorden)."""
+def process_volgblad(page: fitz.Page, afwijkingen: list = None) -> None:
+    """Wist Vak B en herplaatst de relevante regels (zonder technische trefwoorden).
+
+    afwijkingen: optionele lijst van strings die als rode notities worden toegevoegd,
+                 bijv. ['Afwijkende beglazing: 4/16/4 (voorblad: 33.2/16/4/16/33.2)']
+    """
     VAK_B = fitz.Rect(305, 105, 580, 300)
     blokken = page.get_text("dict", clip=VAK_B)["blocks"]
     regels = []
@@ -460,6 +470,210 @@ def process_volgblad(page: fitz.Page) -> None:
         )
         page.insert_text(fitz.Point(VAK_B.x0 + 4, y), r, fontsize=7, color=ZWART)
         y += 10
+
+    # Afwijkingen van het voorblad in rood onderaan Vak B
+    ROOD = (0.85, 0.1, 0.1)
+    ROOD_LICHT = (1.0, 0.88, 0.88)
+    for a in (afwijkingen or []):
+        if y + 10 > VAK_B.y1:
+            break  # geen ruimte meer
+        page.draw_rect(
+            fitz.Rect(VAK_B.x0 + 2, y - 7, VAK_B.x1 - 4, y + 2),
+            color=None, fill=ROOD_LICHT,
+        )
+        page.insert_text(fitz.Point(VAK_B.x0 + 4, y), f'⚠ {a}', fontsize=7, color=ROOD)
+        y += 10
+
+
+# ── Automatische verwerking (geen gebruikersinput) ────────────────────────────
+
+RAAM_KW = ['raam', 'kozijn', 'kiep', 'schuif', 'vast']
+
+
+def _meest_voorkomend(waarden: list):
+    """Retourneert de meest voorkomende waarde in een lijst, of None als de lijst leeg is."""
+    return max(set(waarden), key=waarden.count) if waarden else None
+
+
+def extraheer_header_uit_volgblad(page: fitz.Page) -> dict:
+    """Leest ordernummer, klantnaam, opmeter en datum uit de footer van een volgblad."""
+    tekst = page.get_text('text')
+    regels = [r.strip() for r in tekst.split('\n') if r.strip()]
+    h = {}
+
+    for regel in regels:
+        r = regel.lower()
+        # Ordernummer: patroon BSTIL-XXXXXXX-XX of BFVL-XXXXXXX-XX
+        if re.match(r'^b[a-z]+-\d+', regel, re.I) and '-' in regel:
+            # Kan "BSTIL-0471937-TF - Kiers Jip" zijn
+            delen = regel.split(' - ', 1)
+            h.setdefault('ordernummer', delen[0].strip())
+            if len(delen) > 1 and 'klantnaam' not in h:
+                h['klantnaam'] = delen[1].strip()
+
+        # "Datum opmeting: 15/06/2026 - Opmeter: Ruud van Beurden"
+        m = re.search(r'datum opmeting[:\s]+([\d/\s]+)[–\-]+\s*opmeter[:\s]+(.+)', regel, re.I)
+        if m:
+            h['datum_opmeting'] = m.group(1).strip()
+            h['opmeter']        = m.group(2).strip()
+
+        # Fallback: aparte regels
+        m2 = re.search(r'datum opmeting[:\s]+([\d/\s]+)', regel, re.I)
+        if m2 and 'datum_opmeting' not in h:
+            h['datum_opmeting'] = m2.group(1).strip()
+        m3 = re.search(r'opmeter[:\s]+(.+)', regel, re.I)
+        if m3 and 'opmeter' not in h:
+            h['opmeter'] = m3.group(1).strip()
+
+    return h
+
+
+def bepaal_groep_spec(specs: list) -> dict:
+    """Bepaalt automatisch de consensus-spec voor een groep volgbladen.
+
+    Neemt per veld de meest voorkomende waarde. Geen gebruikersinput.
+    """
+    merged = specs[0].copy()
+
+    merged['heeft_ramen']  = any(any(kw in s.get('element_type', '').lower() for kw in RAAM_KW) for s in specs)
+    merged['heeft_deuren'] = any('deur' in s.get('element_type', '').lower() for s in specs)
+
+    # Enkelvoudige velden: meest voorkomende waarde
+    for veld in ('raamgreep', 'raambeslag', 'beslag_type', 'beslag_kleur',
+                 'deurgreep', 'deurscharnieren', 'kader_buiten', 'vleugel_buiten',
+                 'profiel_reeks', 'profiel_type'):
+        waarden = [s[veld] for s in specs if s.get(veld)]
+        merged[veld] = _meest_voorkomend(waarden)
+
+    # Profieltype standaard aanslag als niet gevonden
+    if not merged.get('profiel_type'):
+        merged['profiel_type'] = 'aanslag'
+
+    # Beglazing: meest voorkomende combinatie
+    glas_types     = [s['glas_type']          for s in specs if s.get('glas_type')]
+    glas_lagen_all = [tuple(s['glas_lagen'])   for s in specs if s.get('glas_lagen')]
+    merged['glas_type']  = _meest_voorkomend(glas_types)
+    merged['glas_lagen'] = list(_meest_voorkomend(glas_lagen_all)) if glas_lagen_all else None
+    merged['glas_str']   = '/'.join(_meest_voorkomend(glas_lagen_all)) if glas_lagen_all else None
+
+    # Afsluitbare kruk
+    opendraaiend = [s for s in specs if s.get('is_opendraaiend')]
+    afs_count    = sum(1 for s in opendraaiend if s.get('heeft_afsluitbare_kruk'))
+    merged['met_sleutel'] = (afs_count == len(opendraaiend) and afs_count > 0)
+
+    # Boolean velden: True als één volgblad het heeft
+    merged['heeft_blokvliegenhor'] = any(s.get('heeft_blokvliegenhor') for s in specs)
+    merged['heeft_schroefgat']     = any(s.get('heeft_schroefgat')     for s in specs)
+
+    return merged
+
+
+def zoek_afwijkingen(spec: dict, groep_spec: dict) -> list:
+    """Vergelijkt één volgblad-spec met de groep-consensus en geeft afwijkingen terug."""
+    afwijkingen = []
+
+    def check(veld, label, waarde_spec=None, waarde_groep=None):
+        v = waarde_spec if waarde_spec is not None else spec.get(veld)
+        g = waarde_groep if waarde_groep is not None else groep_spec.get(veld)
+        if v and g and str(v).lower() != str(g).lower():
+            afwijkingen.append(f'{label}: {v} (voorblad: {g})')
+
+    check('glas_str',        'Afwijkende beglazing')
+    check('profiel_type',    'Afwijkend profiel')
+    check('raamgreep',       'Afwijkende raamkruk')
+    check('raambeslag',      'Afwijkend raambeslag')
+    check('beslag_type',     'Afwijkend scharnier-type')
+    check('beslag_kleur',    'Afwijkende scharnier-kleur')
+    check('deurgreep',       'Afwijkende deurgreep')
+    check('deurscharnieren', 'Afwijkende deurscharnieren')
+    check('kader_buiten',    'Afwijkende kaderkleur')
+    check('vleugel_buiten',  'Afwijkende vleugel-kleur')
+
+    return afwijkingen
+
+
+def groepeer_volgbladen(specs: list) -> list:
+    """Groepeert volgblad-specs in [ramen/kozijnen, deuren].
+
+    Retourneert lijst van (naam, [indices]) tuples.
+    Elementen waarvan het type niet herkend wordt gaan bij ramen.
+    """
+    ramen_idx  = []
+    deuren_idx = []
+    for i, s in enumerate(specs):
+        et = s.get('element_type', '').lower()
+        if 'deur' in et:
+            deuren_idx.append(i)
+        else:
+            ramen_idx.append(i)  # ramen, kozijnen, onbekend → bij ramen
+
+    groepen = []
+    if ramen_idx:
+        groepen.append(('Ramen / Kozijnen', ramen_idx))
+    if deuren_idx:
+        groepen.append(('Deuren', deuren_idx))
+    return groepen
+
+
+def verwerk_automatisch(volgbladen_pad: str, output_pad: str = None,
+                         maat_wijzigingen: dict = None) -> str:
+    """Verwerkt een PDF met alleen volgbladen en genereert automatisch de juiste voorbladen.
+
+    maat_wijzigingen: optioneel dict {pagina_index_in_volgbladen: {'breedte': 'oud=nieuw', 'hoogte': '...'}}
+    """
+    if output_pad is None:
+        p = Path(volgbladen_pad)
+        output_pad = str(p.parent / (p.stem + '_ingevuld.pdf'))
+
+    vb_doc = fitz.open(volgbladen_pad)
+    n      = len(vb_doc)
+
+    # Header extraheren uit de eerste volgblad
+    header = extraheer_header_uit_volgblad(vb_doc[0])
+
+    # Alle volgbladen parsen
+    specs = [parse_volgblad(vb_doc[i]) for i in range(n)]
+
+    # Groeperen
+    groepen = groepeer_volgbladen(specs)
+
+    # Output-document opbouwen
+    result = fitz.open()   # leeg document
+
+    for groep_naam, groep_idx in groepen:
+        groep_specs = [specs[i] for i in groep_idx]
+        groep_spec  = bepaal_groep_spec(groep_specs)
+
+        # Voorblad genereren voor deze groep
+        voorblad_doc = vul_voorblad(header, groep_spec)
+        result.insert_pdf(voorblad_doc)
+
+        # Volgbladen verwerken en toevoegen
+        for i in groep_idx:
+            page = vb_doc[i]
+
+            # Maataanpassingen (optioneel)
+            if maat_wijzigingen and i in maat_wijzigingen:
+                w = maat_wijzigingen[i]
+                for invoer, zone in ((w.get('breedte', ''), 'bottom'),
+                                     (w.get('hoogte',  ''), 'right')):
+                    if invoer and '=' in invoer:
+                        try:
+                            oud, nieuw = [int(x.strip()) for x in invoer.split('=', 1)]
+                            wijzig_maat_in_tekening(page, oud, nieuw, zone=zone)
+                        except ValueError:
+                            pass
+
+            # Afwijkingen bepalen en in Vak B schrijven
+            afwijkingen = zoek_afwijkingen(specs[i], groep_spec)
+            process_volgblad(page, afwijkingen)
+
+            # Volgblad toevoegen aan output
+            result.insert_pdf(vb_doc, from_page=i, to_page=i)
+
+    result.save(output_pad)
+    print(f'✅ Opgeslagen: {output_pad}  ({len(groepen)} voorblad(en), {n} volgblad(en))')
+    return output_pad
 
 
 def _zoek_getal_bbox(arr, getal_str, zone='bottom'):
@@ -597,6 +811,10 @@ def wijzig_maat_in_tekening(page: fitz.Page, oude_maat: int, nieuwe_maat: int,
     target_w = x1 - x0
 
     # Pas font size aan zodat old_str even breed is als in template
+    if not _MAAT_FONT:
+        print('⚠️  Geen geschikt font gevonden — maataanpassing overgeslagen')
+        return False
+
     font_size = 10
     for fs in range(10, 120):
         font = ImageFont.truetype(_MAAT_FONT, fs)
