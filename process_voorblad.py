@@ -630,11 +630,15 @@ def extraheer_regels_vervolgblad(page: fitz.Page) -> list:
 
 
 def process_volgblad(page: fitz.Page, afwijkingen: list = None,
-                     extra_regels: list = None) -> None:
+                     extra_regels: list = None,
+                     genegeerde_afw: list = None,
+                     gewijzigde_afw: list = None) -> None:
     """Wist Vak B en herplaatst de relevante regels (zonder technische trefwoorden).
 
-    afwijkingen : optionele lijst van strings die als rode notities worden toegevoegd
-    extra_regels: gefilterde tekst van vervolgbladen die ook in Vak B geplaatst wordt
+    afwijkingen   : rode notities (afwijkend t.o.v. voorblad)
+    genegeerde_afw: groene notities (bewust afwijkend / genegeerd)
+    gewijzigde_afw: oranje notities (aangepaste tekst door gebruiker)
+    extra_regels  : gefilterde tekst van vervolgbladen
     """
     # Vak B: de spec-zone op de rechterhelft van de pagina.
     # y=192 = start van de bullet-content; y=500 = grens voor Vak C (Werkzaamheden).
@@ -667,6 +671,32 @@ def process_volgblad(page: fitz.Page, afwijkingen: list = None,
             color=None, fill=GEEL,
         )
         page.insert_text(fitz.Point(VAK_B.x0 + 4, y), r, fontsize=7, color=ZWART)
+        y += 10
+
+    # Bewust afwijkend (genegeerd) in groen
+    GROEN       = (0.1, 0.6, 0.2)
+    GROEN_LICHT = (0.88, 1.0, 0.88)
+    for a in (genegeerde_afw or []):
+        if y + 10 > VAK_B.y1:
+            break
+        page.draw_rect(
+            fitz.Rect(VAK_B.x0 + 2, y - 7, VAK_B.x1 - 4, y + 2),
+            color=None, fill=GROEN_LICHT,
+        )
+        page.insert_text(fitz.Point(VAK_B.x0 + 4, y), f'✓ {a}', fontsize=7, color=GROEN)
+        y += 10
+
+    # Tekstueel gewijzigde afwijkingen in oranje
+    ORANJE       = (0.8, 0.4, 0.0)
+    ORANJE_LICHT = (1.0, 0.95, 0.82)
+    for a in (gewijzigde_afw or []):
+        if y + 10 > VAK_B.y1:
+            break
+        page.draw_rect(
+            fitz.Rect(VAK_B.x0 + 2, y - 7, VAK_B.x1 - 4, y + 2),
+            color=None, fill=ORANJE_LICHT,
+        )
+        page.insert_text(fitz.Point(VAK_B.x0 + 4, y), f'✏ {a}', fontsize=7, color=ORANJE)
         y += 10
 
     # Afwijkingen van het voorblad in rood
