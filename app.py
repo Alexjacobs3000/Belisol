@@ -1,9 +1,7 @@
 """
 Streamlit app — Voorbladen invullen (Belisol PVC CERTIX)
 
-Upload de volgbladen-PDF. De app genereert automatisch de juiste voorbladen:
-  • Ramen / kozijnen → één voorblad
-  • Deuren           → apart voorblad (indien aanwezig)
+Upload de volgbladen-PDF. De app genereert automatisch de voorbladen.
 
 Starten:
     streamlit run app.py
@@ -29,12 +27,11 @@ st.set_page_config(
 )
 
 # ── Session state ──────────────────────────────────────────────────────────────
-for _k, _v in [('generated_bytes', None), ('preview_page', 0), ('last_upload_name', None)]:
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
+if 'preview_page'     not in st.session_state: st.session_state.preview_page     = 0
+if 'last_upload_name' not in st.session_state: st.session_state.last_upload_name = None
 
 
-# ── Gecachte helperfuncties (module-niveau) ────────────────────────────────────
+# ── Gecachte functies (module-niveau) ─────────────────────────────────────────
 @st.cache_data(show_spinner="Volgbladen lezen…")
 def _parse(data: bytes):
     doc      = fitz.open(stream=data, filetype="pdf")
@@ -45,9 +42,72 @@ def _parse(data: bytes):
     return header, specs, elementen, groepen
 
 
+@st.cache_data(show_spinner="Voorbladen genereren…")
+def _genereer(pdf_bytes: bytes, pm_frozen: tuple, maat_frozen: tuple) -> bytes:
+    """Genereert de ingevulde PDF. Gecached op basis van alle inputs."""
+    header, specs, elementen, groepen = _parse(pdf_bytes)
+
+    # pm_frozen / maat_frozen → dict reconstrueren
+    pm_invoer   = {k: {'breedte': b, 'hoogte': h} for k, b, h in pm_frozen}
+    maat_invoer = {k: {'breedte': b, 'hoogte': h} for k, b, h in maat_frozen}
+
+    vb_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    result = fitz.open()
+
+    for groep_naam, groep_idx in groepen:
+        groep_idx_set   = set(groep_idx)
+        groep_specs     = [specs[i] for i in groep_idx]
+        groep_spec      = pv.bepaal_groep_spec(groep_specs)
+        groep_elementen = [el for el in elementen if el['paginas'][0] in groep_idx_set]
+
+        voorblad_doc = pv.vul_voorblad(header, groep_spec)
+        result.insert_pdf(voorblad_doc)
+
+        for el in groep_elementen:
+            stuks       = el['spec'].get('stuks', 1)
+            hoofd_idx   = el['paginas'][0]
+            vervolg_idx = el['paginas'][1:]
+
+            extra_regels = []
+            for vi in vervolg_idx:
+                extra_regels.extend(pv.extraheer_regels_vervolgblad(vb_doc[vi]))
+
+            hoofd = vb_doc[hoofd_idx]
+
+            w = maat_invoer.get(hoofd_idx, {})
+            for invoer, zone in ((w.get('breedte', ''), 'bottom'),
+                                 (w.get('hoogte',  ''), 'right')):
+                if invoer and '=' in invoer:
+                    try:
+                        oud, nieuw = [int(x.strip()) for x in invoer.split('=', 1)]
+                        pv.wijzig_maat_in_tekening(hoofd, oud, nieuw, zone=zone)
+                    except ValueError:
+                        pass
+
+            pm = pm_invoer.get(hoofd_idx, {})
+            try:
+                b_pm = int(pm.get('breedte') or 0)
+                h_pm = int(pm.get('hoogte')  or 0)
+                if b_pm and h_pm:
+                    pv.schrijf_pm_maat(hoofd, b_pm, h_pm)
+            except ValueError:
+                pass
+
+            afwijkingen = pv.zoek_afwijkingen(specs[hoofd_idx], groep_spec)
+            pv.process_volgblad(hoofd, afwijkingen, extra_regels=extra_regels)
+
+            for _ in range(stuks):
+                result.insert_pdf(vb_doc, from_page=hoofd_idx, to_page=hoofd_idx)
+
+    pv.voeg_paginanummers_toe(result)
+
+    buf = io.BytesIO()
+    result.save(buf)
+    return buf.getvalue()
+
+
 @st.cache_data(show_spinner=False)
 def _render_pages(data: bytes, scale: float = 1.3):
-    """Rendert alle pagina's van een PDF naar PNG-bytes (gecached)."""
     doc = fitz.open(stream=data, filetype="pdf")
     mat = fitz.Matrix(scale, scale)
     return [doc[i].get_pixmap(matrix=mat).tobytes("png") for i in range(len(doc))]
@@ -57,7 +117,6 @@ def _render_pages(data: bytes, scale: float = 1.3):
 st.title("🏠 Voorbladen invullen")
 st.caption("Belisol PVC CERTIX — upload de volgbladen, de app genereert automatisch de voorbladen")
 
-# ── Twee kolommen ─────────────────────────────────────────────────────────────
 left, right = st.columns([2, 3], gap="large")
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -73,14 +132,11 @@ with left:
         help="PDF met alleen de volgbladen (technische fiches per element)",
     )
 
-    # Reset gegenereerde PDF bij nieuw bestand
     if uploaded is not None:
         if st.session_state.last_upload_name != uploaded.name:
-            st.session_state.generated_bytes = None
             st.session_state.preview_page    = 0
             st.session_state.last_upload_name = uploaded.name
     else:
-        st.session_state.generated_bytes  = None
         st.session_state.last_upload_name = None
 
     if uploaded is None:
@@ -122,9 +178,8 @@ with left:
                         doc_tmp = fitz.open(stream=pdf_bytes, filetype="pdf")
                         regels  = [r.strip() for r in doc_tmp[i].get_text("text").split("\n") if r.strip()]
                         label   = next((r for r in regels if r.startswith("POS.")), f"Volgblad {i+1}")
-
                         label_met_stuks = f"{label}  ×{stuks}" if stuks > 1 else label
-                        n_verv          = len(el['paginas']) - 1
+                        n_verv  = len(el['paginas']) - 1
 
                         if afw:
                             extra_lbl = f"  _(+{n_verv} vervolgblad)_" if n_verv else ""
@@ -138,7 +193,7 @@ with left:
 
             # 3. PM-maaten ─────────────────────────────────────────────────────
             st.subheader("📐 Productiemaaten (PM)")
-            st.caption("Leeg laten = niet invullen.")
+            st.caption("Optioneel. De preview past automatisch aan.")
 
             pm_invoer: dict[int, dict] = {}
             for el in elementen:
@@ -157,8 +212,8 @@ with left:
 
                 cc1, cc2, cc3 = st.columns([3, 2, 2])
                 cc1.markdown(f"**{label}**")
-                b = cc2.text_input("Breedte", key=f"pm_b_{i}", placeholder=b_ph, label_visibility="collapsed")
-                h = cc3.text_input("Hoogte",  key=f"pm_h_{i}", placeholder=h_ph, label_visibility="collapsed")
+                b = cc2.text_input("B", key=f"pm_b_{i}", placeholder=b_ph, label_visibility="collapsed")
+                h = cc3.text_input("H", key=f"pm_h_{i}", placeholder=h_ph, label_visibility="collapsed")
                 pm_invoer[i] = {"breedte": b.strip(), "hoogte": h.strip()}
 
             # 4. Maataanpassingen (optioneel) ──────────────────────────────────
@@ -175,103 +230,43 @@ with left:
                     label   = next((r for r in regels if r.startswith("POS.")), f"Volgblad {i+1}")
                     cc1, cc2, cc3 = st.columns([2, 2, 2])
                     cc1.markdown(f"**{label}**")
-                    b = cc2.text_input("Breedte", key=f"b_{i}",  placeholder="bijv. 980=1080",  label_visibility="collapsed")
-                    h = cc3.text_input("Hoogte",  key=f"h_{i}",  placeholder="bijv. 2290=2390", label_visibility="collapsed")
+                    b = cc2.text_input("B", key=f"b_{i}",  placeholder="bijv. 980=1080",  label_visibility="collapsed")
+                    h = cc3.text_input("H", key=f"h_{i}",  placeholder="bijv. 2290=2390", label_visibility="collapsed")
                     maat_invoer[i] = {"breedte": b.strip(), "hoogte": h.strip()}
 
             st.divider()
 
-            # 5. Genereren ─────────────────────────────────────────────────────
-            if st.button("✅ Genereer voorbladen", type="primary", use_container_width=True):
-                with st.spinner("PDF wordt gegenereerd…"):
-                    vb_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                    result = fitz.open()
+            # 5. Auto-genereren + download ────────────────────────────────────
+            pm_frozen   = tuple(sorted((k, d['breedte'], d['hoogte']) for k, d in pm_invoer.items()))
+            maat_frozen = tuple(sorted((k, d['breedte'], d['hoogte']) for k, d in maat_invoer.items()))
+            generated_bytes = _genereer(pdf_bytes, pm_frozen, maat_frozen)
 
-                    for groep_naam, groep_idx in groepen:
-                        groep_idx_set   = set(groep_idx)
-                        groep_specs     = [specs[i] for i in groep_idx]
-                        groep_spec      = pv.bepaal_groep_spec(groep_specs)
-                        groep_elementen = [el for el in elementen if el['paginas'][0] in groep_idx_set]
+            n_vb  = len(groepen)
+            n_vlg = sum(
+                el['spec'].get('stuks', 1) for el in elementen
+                if not el['spec'].get('is_vervolgblad')
+            )
+            st.caption(f"{n_vb} voorblad(en) · {n_vlg} volgblad(en) · {len(generated_bytes) // 1024} KB")
 
-                        voorblad_doc = pv.vul_voorblad(header, groep_spec)
-                        result.insert_pdf(voorblad_doc)
-
-                        for el in groep_elementen:
-                            stuks       = el['spec'].get('stuks', 1)
-                            hoofd_idx   = el['paginas'][0]
-                            vervolg_idx = el['paginas'][1:]
-
-                            extra_regels = []
-                            for vi in vervolg_idx:
-                                extra_regels.extend(pv.extraheer_regels_vervolgblad(vb_doc[vi]))
-
-                            hoofd = vb_doc[hoofd_idx]
-
-                            w = maat_invoer.get(hoofd_idx, {})
-                            for invoer, zone in ((w.get("breedte", ""), "bottom"),
-                                                 (w.get("hoogte",  ""), "right")):
-                                if invoer and "=" in invoer:
-                                    try:
-                                        oud, nieuw = [int(x.strip()) for x in invoer.split("=", 1)]
-                                        pv.wijzig_maat_in_tekening(hoofd, oud, nieuw, zone=zone)
-                                    except ValueError:
-                                        pass
-
-                            pm = pm_invoer.get(hoofd_idx, {})
-                            try:
-                                b_pm = int(pm.get("breedte") or 0)
-                                h_pm = int(pm.get("hoogte")  or 0)
-                                if b_pm and h_pm:
-                                    pv.schrijf_pm_maat(hoofd, b_pm, h_pm)
-                            except ValueError:
-                                pass
-
-                            afwijkingen = pv.zoek_afwijkingen(specs[hoofd_idx], groep_spec)
-                            pv.process_volgblad(hoofd, afwijkingen, extra_regels=extra_regels)
-
-                            for _ in range(stuks):
-                                result.insert_pdf(vb_doc, from_page=hoofd_idx, to_page=hoofd_idx)
-
-                    pv.voeg_paginanummers_toe(result)
-
-                    buf = io.BytesIO()
-                    result.save(buf)
-                    st.session_state.generated_bytes = buf.getvalue()
-                    st.session_state.preview_page    = 0
-
-            # 6. Download ──────────────────────────────────────────────────────
-            if st.session_state.generated_bytes:
-                n_vb   = len(groepen)
-                n_vlg  = sum(
-                    el['spec'].get('stuks', 1) for el in elementen
-                    if not el['spec'].get('is_vervolgblad')
-                )
-                st.success(f"✅ Klaar — {n_vb} voorblad(en), {n_vlg} volgblad(en) in output")
-                output_naam = Path(uploaded.name).stem + "_ingevuld.pdf"
-                st.download_button(
-                    label="⬇️ Download ingevuld PDF",
-                    data=st.session_state.generated_bytes,
-                    file_name=output_naam,
-                    mime="application/pdf",
-                    use_container_width=True,
-                    type="primary",
-                )
+            output_naam = Path(uploaded.name).stem + "_ingevuld.pdf"
+            st.download_button(
+                label="⬇️ Download ingevuld PDF",
+                data=generated_bytes,
+                file_name=output_naam,
+                mime="application/pdf",
+                use_container_width=True,
+                type="primary",
+            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # RECHTER KOLOM — live preview
 # ══════════════════════════════════════════════════════════════════════════════
 with right:
-    if uploaded is not None:
-        # Toon gegenereerde PDF zodra beschikbaar, anders de upload
-        is_generated   = st.session_state.generated_bytes is not None
-        preview_bytes  = st.session_state.generated_bytes if is_generated else uploaded.getvalue()
-        preview_label  = "📄 Preview — Ingevuld PDF" if is_generated else "📄 Preview — Volgbladen"
+    if uploaded is not None and specs and generated_bytes is not None:
+        st.subheader("📄 Preview — Ingevuld PDF")
 
-        st.subheader(preview_label)
-
-        # Render pagina's (gecached op basis van bytes)
-        pages   = _render_pages(preview_bytes)
+        pages   = _render_pages(generated_bytes)
         n_pages = len(pages)
         current = max(0, min(st.session_state.preview_page, n_pages - 1))
 
@@ -287,8 +282,7 @@ with right:
             f"<div style='padding-top:6px; color:#555;'>Pagina <b>{current + 1}</b> / {n_pages}</div>",
             unsafe_allow_html=True,
         )
-        # Volledig scherm: open PDF in nieuw tabblad (native browser PDF viewer)
-        pdf_b64 = base64.b64encode(preview_bytes).decode()
+        pdf_b64 = base64.b64encode(generated_bytes).decode()
         nav4.markdown(
             f'<a href="data:application/pdf;base64,{pdf_b64}" target="_blank" rel="noopener" '
             f'style="display:block; text-align:center; padding:6px 0; background:#f0f2f6; '
@@ -301,7 +295,6 @@ with right:
         with st.container(height=780, border=True):
             for i, img_bytes in enumerate(pages):
                 if i == current:
-                    # Markeer de huidige pagina met een blauwe rand
                     st.markdown(
                         '<div style="outline:3px solid #1f77b4; border-radius:4px; '
                         'margin-bottom:6px; padding:2px;">',
@@ -311,26 +304,26 @@ with right:
                 if i == current:
                     st.markdown('</div>', unsafe_allow_html=True)
 
-        # JavaScript: pijltjestoetsen ◀/▶ ────────────────────────────────────
+        # Pijltjestoetsen ──────────────────────────────────────────────────────
         components.html(
             """
             <script>
             (function() {
-                function clickButton(label) {
-                    var btns = window.parent.document.querySelectorAll('button[kind="secondary"]');
-                    for (var btn of btns) {
-                        if (btn.textContent.trim() === label) {
-                            btn.click();
-                            return;
-                        }
+                function clickBtn(label) {
+                    var btns = window.parent.document.querySelectorAll('button');
+                    for (var b of btns) {
+                        if (b.textContent.trim() === label) { b.click(); return; }
                     }
                 }
                 window.parent.document.addEventListener('keydown', function(e) {
-                    if (e.key === 'ArrowLeft')  clickButton('◀');
-                    if (e.key === 'ArrowRight') clickButton('▶');
+                    if (e.key === 'ArrowLeft')  clickBtn('◀');
+                    if (e.key === 'ArrowRight') clickBtn('▶');
                 });
             })();
             </script>
             """,
             height=0,
         )
+
+    elif uploaded is not None:
+        st.info("Preview wordt geladen…")
