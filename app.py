@@ -106,10 +106,9 @@ for groep_naam, groep_idx in groepen:
             n_vervolgbladen = len(el['paginas']) - 1
 
             if afw:
-                st.warning(
-                    f"⚠️ **{label_met_stuks}** — afwijkingen: {', '.join(afw)}"
-                    + (f"  _(+{n_vervolgbladen} vervolgblad)_" if n_vervolgbladen else "")
-                )
+                extra_lbl = f"  _(+{n_vervolgbladen} vervolgblad)_" if n_vervolgbladen else ""
+                afw_lijst = "\n".join(f"- {a}" for a in afw)
+                st.warning(f"⚠️ **{label_met_stuks}**{extra_lbl}\n\n{afw_lijst}")
             else:
                 extra = f"  _(+{n_vervolgbladen} vervolgblad)_" if n_vervolgbladen else ""
                 st.caption(f"✓ {label_met_stuks} — conform voorblad{extra}")

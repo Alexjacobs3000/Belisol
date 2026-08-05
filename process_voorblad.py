@@ -474,10 +474,15 @@ def parse_volgblad(page: fitz.Page) -> dict:
         glas_clean = strip_glas_suffixen(glas_raw)
         info['glas_type'], info['glas_lagen'] = parse_glas(glas_clean)
         info['glas_str'] = glas_clean   # zonder TF/TFO, voor weergave
+        # Alles na de eerste token (bv. "volledig gezandstraald", "gedeeltelijk gezandstraald")
+        eerste_token = glas_clean.split()[0] if glas_clean else ''
+        extra = glas_clean[len(eerste_token):].strip()
+        info['glas_extra'] = extra if extra else None
     else:
         info['glas_type']  = None
         info['glas_lagen'] = None
         info['glas_str']   = None
+        info['glas_extra'] = None
 
     return info
 
@@ -548,6 +553,7 @@ def vul_voorblad(header: dict, spec: dict) -> fitz.Document:
     # Beglazing (2.3.5)
     glas_type  = spec.get('glas_type')
     glas_lagen = spec.get('glas_lagen') or []
+    glas_extra = spec.get('glas_extra')   # bv. 'volledig gezandstraald'
     if glas_type == 'dubbel' and len(glas_lagen) >= 2:
         for spot, pt, waarde in [
             (GLAS_DUBBEL_SPOT1, GLAS_DUBBEL_PT1, glas_lagen[0]),
@@ -556,6 +562,10 @@ def vul_voorblad(header: dict, spec: dict) -> fitz.Document:
             p.draw_rect(spot, color=None, fill=(1, 1, 1))   # bedek puntjes
             p.insert_text(pt, waarde, fontsize=9, color=ZWART)
         arceer(p, GLAS_TRIPLE_RECT)   # triple niet van toepassing
+        # Schrijf glas_extra in de doorgearceerde triple-rij (y≈325)
+        if glas_extra:
+            p.insert_text(fitz.Point(229, 328), f'* {glas_extra}',
+                          fontsize=7, color=ZWART)
     elif glas_type == 'triple' and len(glas_lagen) >= 3:
         for spot, pt, waarde in [
             (GLAS_TRIPLE_SPOT1, GLAS_TRIPLE_PT1, glas_lagen[0]),
@@ -565,6 +575,10 @@ def vul_voorblad(header: dict, spec: dict) -> fitz.Document:
             p.draw_rect(spot, color=None, fill=(1, 1, 1))
             p.insert_text(pt, waarde, fontsize=9, color=ZWART)
         arceer(p, GLAS_DUBBEL_RECT)   # dubbel niet van toepassing
+        # Schrijf glas_extra in de doorgearceerde dubbel-rij (y≈316)
+        if glas_extra:
+            p.insert_text(fitz.Point(229, 316), f'* {glas_extra}',
+                          fontsize=7, color=ZWART)
 
     # Frame-kleur (blokvliegenhor)
     if spec['heeft_blokvliegenhor'] and kader:
@@ -737,10 +751,13 @@ def bepaal_groep_spec(specs: list) -> dict:
     glas_types     = [s['glas_type']        for s in specs if s.get('glas_type')]
     glas_lagen_all = [tuple(s['glas_lagen']) for s in specs if s.get('glas_lagen')]
     glas_strs      = [s['glas_str']         for s in specs if s.get('glas_str')]
+    glas_extras    = [s['glas_extra']       for s in specs if s.get('glas_extra')]
     merged['glas_type']  = _meest_voorkomend(glas_types)
     merged['glas_lagen'] = list(_meest_voorkomend(glas_lagen_all)) if glas_lagen_all else None
     # glas_str bewaart de volledige notatie incl. spouwbreedtes (bijv. '4/16/4/16/4')
-    merged['glas_str']   = _meest_voorkomend(glas_strs) if glas_strs else None
+    merged['glas_str']   = _meest_voorkomend(glas_strs)  if glas_strs  else None
+    # glas_extra: niet-standaard behandeling (bv. 'volledig gezandstraald')
+    merged['glas_extra'] = _meest_voorkomend(glas_extras) if glas_extras else None
 
     # Afsluitbare kruk
     opendraaiend = [s for s in specs if s.get('is_opendraaiend')]
@@ -765,6 +782,7 @@ def zoek_afwijkingen(spec: dict, groep_spec: dict) -> list:
             afwijkingen.append(f'{label}: {v} (voorblad: {g})')
 
     check('glas_str',        'Afwijkende beglazing')
+    check('glas_extra',      'Speciale glasbehandeling')
     check('profiel_type',    'Afwijkend profiel')
     check('raamgreep',       'Afwijkende raamkruk')
     check('raambeslag',      'Afwijkend raambeslag')
