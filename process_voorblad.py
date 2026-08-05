@@ -133,15 +133,81 @@ OPENDRAAIEND_KW = ['draai', 'kiep', 'opendraaiend']
 
 # ── Trefwoorden die uit Vak B gefilterd worden ────────────────────────────────
 REMOVE_KEYWORDS = [
-    'certix', 'classix', 'schroefgat', 'fixatiegat',
-    'kleur kader', 'kleur vleugel', 'vleugel luna', 'nachtventilatie',
+    # Profiel
+    'certix', 'classix',
+    # Schroefgaten
+    'schroefgat', 'fixatiegat',
+    # Kleuren (al op voorblad)
+    'kleur kader', 'kleur vleugel', 'kleur paneel', 'kleur scharnieren',
+    'vleugel luna', 'nachtventilatie',
+    # Vliegenhor
     'blokvliegenhor', 'blok vliegenhor',
+    # Beslag / krukken
     'raamkruk', 'raamgreep',
     'afsluitbare raamkruk', 'afsluitbare raamgreep',
     'zichtbaar beslag', 'verdoken beslag',
     'deurgreep', 'deurkruk', 'deurscharnieren',
-    'glas',
+    'standaard deurkruk', 'vijfpuntsluiting',
+    'knopcilinder', 'cilinderplaatje', 'cilinder',
+    'greep t-model',
+    # Beglazing (al op voorblad) — specifieker om beschrijvingen als "1/3 glas" te behouden
+    'triple glas', 'dubbel glas', 'enkel glas',
+    'glas (', 'glas geplaatst',
+    'isolatiewaarde', 'warmEdge', 'afstandshouder',
+    # Vervolgblad-verwijzingen
+    'zie volgende pagina',
+    # Profielonderdelen
+    'deurvleugel', 'slijtkader', 'tussenstijl',
+    'vlak paneel',
+    # Info prod sectie
+    'info prod',
 ]
+
+
+def voeg_paginanummers_toe(result: fitz.Document) -> None:
+    """Schrijft paginanummers (P: huidig/totaal) vet en groot op alle pagina's.
+
+    • Volgbladen: bestaande P: rechtsonder wissen + nieuw nummer rechtsboven plaatsen
+    • Voorbladen: bestaande 'P. : ...' placeholder wissen + nummer op dezelfde positie
+    Lettertype: Helvetica Bold (hebo), 11pt.
+    """
+    totaal  = len(result)
+    FONT    = 'hebo'   # Helvetica Bold (ingebouwd in PyMuPDF)
+    FSIZE   = 11
+
+    for i in range(totaal):
+        page   = result[i]
+        nr_str = f'P: {i + 1}/{totaal}'
+        pw     = page.rect.width
+
+        # ── Volgbladen ─────────────────────────────────────────────────────────
+        # Wis bestaande P: rechtsonder (y > 800)
+        for rct in page.search_for('P:'):
+            if rct.x0 > 400 and rct.y0 > 800:
+                wis = fitz.Rect(rct.x0 - 1, rct.y0 - 1, pw - 4, rct.y1 + 1)
+                page.add_redact_annot(wis, fill=(1, 1, 1))
+                page.apply_redactions()
+
+        # Schrijf nummer rechtsboven op volgbladen (alleen als er GEEN voorblad-placeholder is)
+        heeft_voorblad_placeholder = bool(page.search_for('P. :'))
+        if not heeft_voorblad_placeholder:
+            # Rechtsboven: x = pw - 60, y = 20 (boven bestaande content)
+            page.insert_text(
+                fitz.Point(pw - 60, 20),
+                nr_str, fontsize=FSIZE, fontname=FONT, color=ZWART,
+            )
+
+        # ── Voorbladen ─────────────────────────────────────────────────────────
+        # Wis "P. : ..... / ....." en schrijf nummer op dezelfde positie
+        for rct in page.search_for('P. :'):
+            if rct.x0 > 400 and rct.y0 < 30:
+                wis = fitz.Rect(rct.x0 - 1, rct.y0 - 1, pw - 4, rct.y1 + 2)
+                page.add_redact_annot(wis, fill=(1, 1, 1))
+                page.apply_redactions()
+                page.insert_text(
+                    fitz.Point(rct.x0, rct.y1 + 1),
+                    nr_str, fontsize=FSIZE, fontname=FONT, color=ZWART,
+                )
 
 
 def arceer(p: fitz.Page, rect: fitz.Rect, kleur=None, step: int = 8) -> None:
@@ -180,15 +246,29 @@ def normaliseer_kleur(raw: str) -> str:
     return r  # onbekende kleur: geef terug als-is
 
 
+def strip_glas_suffixen(glas_raw: str) -> str:
+    """Verwijdert TF- en TFO-suffixen uit een glasnotatie.
+
+    Voorbeeld: '4 TF/16/4/16/4 TFO' → '4/16/4/16/4'
+               '33.2 TF/16/4/16/33.2 TFO' → '33.2/16/4/16/33.2'
+               '4/16/4 TFO' → '4/16/4'
+    """
+    s = re.sub(r'\s*TFO\b', '', glas_raw)   # TFO eerst (bevat TF)
+    s = re.sub(r'\s*TF\b',  '', s)           # daarna losse TF
+    return s.strip()
+
+
 def parse_glas(glas_str: str):
     """Parse een glasnotatie zoals '4/16/4' of '33.2/16/4/16/33.2'.
     Retourneert (type, lagen):
       type  = 'dubbel' (2 glaslagen) of 'triple' (3 glaslagen) of None
       lagen = lijst van glaslaag-diktes als strings (bijv. ['4', '4'] of ['33.2', '4', '33.2'])
     Even indices in de slash-splitsing zijn glaslagen, oneven zijn spouwbreedtes.
+    Verwerkt automatisch TF/TFO-suffixen.
     """
-    # Verwijder eventuele suffixen zoals 'TFO', 'HR++', etc.
-    token = glas_str.strip().split()[0]
+    schoon = strip_glas_suffixen(glas_str)
+    # Neem het eerste token (stopt bij spatie)
+    token = schoon.split()[0] if schoon else ''
     delen = token.split('/')
     lagen = [delen[i] for i in range(0, len(delen), 2)]
     if len(lagen) == 2:
@@ -226,14 +306,28 @@ def extraheer_header(doc: fitz.Document) -> dict:
 
 
 def parse_volgblad(page: fitz.Page) -> dict:
-    """Leest profiel, kleuren en opties uit één volgblad-pagina."""
+    """Leest profiel, kleuren en opties uit één volgblad-pagina.
+
+    Ondersteunt zowel het oude formaat als het nieuwe Opmeetfiche-formaat.
+    Velden:
+      element_type       : 'Kozijn', 'Deur', of tekst uit Vak B
+      stuks              : aantal stuks (standaard 1)
+      is_vervolgblad     : True als de pagina geen eigen POS.-header heeft
+      offer_breedte/hoogte: offerteafmetingen in mm (voor PM-hint)
+      kader_buiten       : UniColor-code (M9010, V716N, …) uit binnenzijde
+      vleugel_buiten     : idem; fallback naar kader als idem/niet gevonden
+    """
     tekst = page.get_text("text")
     t = tekst.lower()
     info = {
         'profiel_reeks': None, 'profiel_type': None,
         'kader_buiten': None,  'vleugel_buiten': None,
         'heeft_blokvliegenhor': False, 'heeft_schroefgat': False,
+        'stuks': 1, 'is_vervolgblad': False,
+        'offer_breedte': None, 'offer_hoogte': None,
     }
+
+    # ── Profiel-reeks ──────────────────────────────────────────────────────────
     if 'certix 116' in t or 'certix blok 116' in t:
         info['profiel_reeks'] = 'certix116'
     elif 'certix 82' in t or 'certix blok 82' in t:
@@ -244,84 +338,146 @@ def parse_volgblad(page: fitz.Page) -> dict:
     elif 'stomp' in t:
         info['profiel_type'] = 'stomp'
 
-    m = re.search(r'kleur kader[^:\n]*:\s*([A-Z][A-Z0-9]+)', tekst, re.I)
-    if m:
-        info['kader_buiten'] = m.group(1).upper()
+    # ── Vervolgblad-detectie ───────────────────────────────────────────────────
+    # Een vervolgblad heeft GEEN Kolom A (geen PM/DM/BM labels links).
+    # Hoofdbladen hebben altijd een PM-label in het midden van de pagina
+    # (x < 100, y < 700 — om de footer-matches op "Opmeter" uit te sluiten).
+    pm_links = [r for r in page.search_for('PM') if r.x0 < 100 and r.y0 < 700]
+    is_vervolgblad = len(pm_links) == 0
+    info['is_vervolgblad'] = is_vervolgblad
 
-    m2 = re.search(r'kleur vleugel[^:\n]*:\s*([A-Z][A-Z0-9]+)', tekst, re.I)
-    if m2:
-        val = m2.group(1).upper()
-        if val != 'IDEM':
+    # ── POS-headerregel: nieuw formaat ─────────────────────────────────────────
+    # Bijv. "POS. 1.1A  |  Kozijn   |  1 stuk"
+    m_pos = re.search(
+        r'POS\.\s*[\d.]+[A-Z]?\s*\|\s*(\w+)\s*\|\s*(\d+)\s*stuk',
+        tekst, re.I,
+    )
+    if m_pos and not is_vervolgblad:
+        info['element_type'] = m_pos.group(1).strip()   # 'Kozijn' of 'Deur'
+        info['stuks']        = int(m_pos.group(2))
+    elif is_vervolgblad:
+        # Vervolgblad: geen eigen element_type of stuks
+        info['element_type'] = ''
+        info['stuks']        = 1
+
+    # ── Offerteafmetingen (hint voor PM-invoer) ────────────────────────────────
+    m_afw = re.search(r'Afmetingen:\s*(\d+)\s*mm\s*x\s*(\d+)\s*mm', tekst, re.I)
+    if m_afw:
+        info['offer_breedte'] = int(m_afw.group(1))
+        info['offer_hoogte']  = int(m_afw.group(2))
+
+    # ── Kaderkleur: UniColor M/V-code uit binnenzijde ─────────────────────────
+    # Probeer eerst expliciet 'binnenzijde', dan generiek (oud formaat)
+    m_kb = re.search(r'kleur kader binnenzijde[^:\n]*:\s*([MV]\w+)', tekst, re.I)
+    if not m_kb:
+        m_kb = re.search(r'kleur kader[^:\n]*:\s*([MV]\w+)', tekst, re.I)
+    if m_kb:
+        info['kader_buiten'] = m_kb.group(1).upper()
+
+    # ── Vleugel-kleur: UniColor M/V-code uit binnenzijde ──────────────────────
+    m_vb = re.search(r'kleur vleugel binnenzijde[^:\n]*:\s*([MV]\w+)', tekst, re.I)
+    if not m_vb:
+        m_vb = re.search(r'kleur vleugel[^:\n]*:\s*([MV]\w+)', tekst, re.I)
+    if m_vb:
+        val = m_vb.group(1).upper()
+        if val not in ('IDEM',):
             info['vleugel_buiten'] = val
-    if not info['vleugel_buiten'] and 'idem kleur kader' in t:
-        info['vleugel_buiten'] = info['kader_buiten']
+    # Fallback: idem kader (als tekst "idem" bevat of vleugel niet gevonden)
+    if not info['vleugel_buiten']:
+        if 'idem kleur kader' in t or 'idem vleugel' in t:
+            info['vleugel_buiten'] = info['kader_buiten']
 
     info['heeft_blokvliegenhor'] = 'blokvliegenhor' in t or 'blok vliegenhor' in t
     info['heeft_schroefgat']     = 'schroefgat' in t or 'fixatiegat' in t
 
-    # Element type (eerste regel Vak B) — bepaalt of draaiende vleugel aanwezig is
-    VAK_B_clip = fitz.Rect(305, 105, 580, 300)
-    vak_b_blokken = page.get_text('dict', clip=VAK_B_clip)['blocks']
-    eerste_regel = ''
-    for blk in vak_b_blokken:
-        for line in blk.get('lines', []):
-            r = ' '.join(s['text'] for s in line['spans']).strip()
-            if r and r not in ('•', '•', '-'):
-                eerste_regel = r
+    # ── Element type uit Vak B (oud formaat / fallback) ───────────────────────
+    if not info['element_type']:
+        VAK_B_clip = fitz.Rect(305, 105, 580, 300)
+        vak_b_blokken = page.get_text('dict', clip=VAK_B_clip)['blocks']
+        eerste_regel = ''
+        for blk in vak_b_blokken:
+            for line in blk.get('lines', []):
+                r = ' '.join(s['text'] for s in line['spans']).strip()
+                if r and r not in ('•', '•', '-'):
+                    eerste_regel = r
+                    break
+            if eerste_regel:
                 break
-        if eerste_regel:
-            break
-    info['element_type'] = eerste_regel
-    info['is_opendraaiend'] = any(kw in eerste_regel.lower() for kw in OPENDRAAIEND_KW)
+        info['element_type'] = eerste_regel
+
+    info['is_opendraaiend'] = any(kw in info['element_type'].lower() for kw in OPENDRAAIEND_KW)
+    # Vervolgbladen: check of de volledige tekst opendraaiend bevat
+    if info['is_vervolgblad']:
+        info['is_opendraaiend'] = any(kw in t for kw in OPENDRAAIEND_KW)
     info['heeft_afsluitbare_kruk'] = bool(
         re.search(r'afsluitbaar', t) and re.search(r'kruk|greep', t)
     )
 
-    # Raamkruk/raamgreep kleur + SKG-beslag
-    # Zoek de volledige raamkruk-regel
+    # ── Raamkruk/raamgreep kleur + SKG-beslag ─────────────────────────────────
     m3 = re.search(r'(raam(?:kruk|greep)[^\n]*)', tekst, re.I)
     if m3:
         raamkruk_regel = m3.group(1)
-        # Kleur: alles na dubbelpunt, genormaliseerd (F1 / aluminium naturel → zilver)
         m_kleur = re.search(r'raam(?:kruk|greep)\s*:\s*(.+)', raamkruk_regel, re.I)
         info['raamgreep'] = normaliseer_kleur(m_kleur.group(1).strip()) if m_kleur else None
-        # SKG-beslag: aanwezig als 'SKG' in de raamkruk-regel staat
         info['raambeslag'] = 'skg' if re.search(r'skg', raamkruk_regel, re.I) else 'standaard'
     else:
         info['raamgreep'] = None
         info['raambeslag'] = None
 
-    # Raamscharnieren: verdoken of zichtbaar beslag + kleur
-    # Kleur alleen aanduiden bij zichtbaar; bij verdoken enkel het type
+    # Nieuw formaat: SKG** in tekst = SKG-beslag
+    if re.search(r'SKG\*\*', tekst):
+        info['raambeslag'] = 'skg'
+
+    # ── Raamscharnieren ────────────────────────────────────────────────────────
+    # Oud formaat: "Verdoken beslag: wit" / "Zichtbaar beslag: zilver"
     m_sch = re.search(r'(verdoken|zichtbaar)\s+beslag\s*:\s*(.+)', tekst, re.I)
     if m_sch:
         info['beslag_type'] = m_sch.group(1).lower()
         if info['beslag_type'] == 'zichtbaar':
             info['beslag_kleur'] = normaliseer_kleur(m_sch.group(2).strip())
         else:
-            info['beslag_kleur'] = None  # verdoken: geen kleur aanduiden
+            info['beslag_kleur'] = None
     else:
         info['beslag_type'] = None
         info['beslag_kleur'] = None
 
-    # Deurgreep / deurkruk kleur
-    m_dg = re.search(r'deur(?:greep|kruk)\s*:\s*(.+)', tekst, re.I)
+    # ── Deurgreep / deurkruk kleur ────────────────────────────────────────────
+    # Nieuw formaat: "Standaard deurkruk binnenzijde: Aluminium naturel geanodiseerd (F1)"
+    m_dg = re.search(
+        r'(?:standaard\s+)?deur(?:greep|kruk)(?:\s+binnenzijde)?\s*:\s*(.+)',
+        tekst, re.I,
+    )
     info['deurgreep'] = normaliseer_kleur(m_dg.group(1).strip()) if m_dg else None
 
-    # Deurscharnieren kleur (nooit verdoken)
-    m_ds = re.search(r'deurscharnieren\s*:\s*(.+)', tekst, re.I)
-    info['deurscharnieren'] = normaliseer_kleur(m_ds.group(1).strip()) if m_ds else None
-
-    # Beglazing: '4/16/4 TFO' of '33.2/16/4/16/33.2'
-    m_glas = re.search(r'glas\s*(?:\([^)]*\))?\s*:\s*([\d./]+)', tekst, re.I)
-    if m_glas:
-        glas_raw = m_glas.group(1)
-        info['glas_type'], info['glas_lagen'] = parse_glas(glas_raw)
-        info['glas_str'] = glas_raw  # voor weergave bij inconsistentie
+    # ── Deurscharnieren / scharnieren kleur ───────────────────────────────────
+    # Nieuw: "Kleur scharnieren: Wit"  — oud: "Deurscharnieren: Wit"
+    m_ds = re.search(r'(?:kleur\s+scharnieren|deurscharnieren)\s*:\s*(.+)', tekst, re.I)
+    if m_ds:
+        info['deurscharnieren'] = normaliseer_kleur(m_ds.group(1).strip())
+        # Als er scharnieren gevonden zijn, is het beslag zichtbaar
+        if not info['beslag_type']:
+            info['beslag_type']  = 'zichtbaar'
+            info['beslag_kleur'] = info['deurscharnieren']
     else:
-        info['glas_type'] = None
+        info['deurscharnieren'] = None
+
+    # ── Beglazing ──────────────────────────────────────────────────────────────
+    # Nieuw formaat: "Triple glas (HR+++): 4 TF/16/4/16/4 TFO"
+    #               "Glas (HR+++): 4/16/4 TFO"
+    # Oud formaat:  "glas: 4/16/4"
+    m_glas = re.search(
+        r'(?:(?:triple|dubbel|enkel)\s+(?:veiligheids)?glas|glas)\s*(?:\([^)]*\))?\s*:\s*([^\n]+)',
+        tekst, re.I,
+    )
+    if m_glas:
+        glas_raw   = m_glas.group(1).strip()
+        glas_clean = strip_glas_suffixen(glas_raw)
+        info['glas_type'], info['glas_lagen'] = parse_glas(glas_clean)
+        info['glas_str'] = glas_clean   # zonder TF/TFO, voor weergave
+    else:
+        info['glas_type']  = None
         info['glas_lagen'] = None
-        info['glas_str'] = None
+        info['glas_str']   = None
 
     return info
 
@@ -441,29 +597,57 @@ def vul_voorblad(header: dict, spec: dict) -> fitz.Document:
     return doc
 
 
-def process_volgblad(page: fitz.Page, afwijkingen: list = None) -> None:
+def extraheer_regels_vervolgblad(page: fitz.Page) -> list:
+    """Extraheert gefilterde tekst uit een vervolgblad-pagina.
+
+    De sidebar-header (y < 160) en de footer (y > 750) worden genegeerd.
+    Dezelfde REMOVE_KEYWORDS-filter als voor Vak B wordt toegepast.
+    Retourneert een lijst van schone tekstregels.
+    """
+    CONTENT_ZONE = fitz.Rect(0, 160, page.rect.width, 750)
+    blokken = page.get_text('dict', clip=CONTENT_ZONE)['blocks']
+    regels = []
+    for blk in blokken:
+        for line in blk.get('lines', []):
+            t = ' '.join(s['text'] for s in line['spans']).strip()
+            if t and t not in ('•', '•', '-', 'B', 'C', 'D'):
+                regels.append(t)
+    return [r for r in regels if not any(kw in r.lower() for kw in REMOVE_KEYWORDS)]
+
+
+def process_volgblad(page: fitz.Page, afwijkingen: list = None,
+                     extra_regels: list = None) -> None:
     """Wist Vak B en herplaatst de relevante regels (zonder technische trefwoorden).
 
-    afwijkingen: optionele lijst van strings die als rode notities worden toegevoegd,
-                 bijv. ['Afwijkende beglazing: 4/16/4 (voorblad: 33.2/16/4/16/33.2)']
+    afwijkingen : optionele lijst van strings die als rode notities worden toegevoegd
+    extra_regels: gefilterde tekst van vervolgbladen die ook in Vak B geplaatst wordt
     """
-    VAK_B = fitz.Rect(305, 105, 580, 300)
+    # Vak B: de spec-zone op de rechterhelft van de pagina.
+    # y=192 = start van de bullet-content; y=500 = grens voor Vak C (Werkzaamheden).
+    VAK_B = fitz.Rect(305, 192, 580, 500)
+
+    # Lees huidige tekst in Vak B
     blokken = page.get_text("dict", clip=VAK_B)["blocks"]
     regels = []
     for blk in blokken:
         for line in blk.get("lines", []):
             tekst = " ".join(s["text"] for s in line["spans"]).strip()
-            # Filter lege regels en losse opsommingstekens
             if tekst and tekst not in ('•', '•', '-', ''):
                 regels.append(tekst)
     behoud = [r for r in regels if not any(kw in r.lower() for kw in REMOVE_KEYWORDS)]
 
+    # Voeg tekst van vervolgbladen toe (al gefilterd)
+    if extra_regels:
+        behoud.extend(extra_regels)
+
+    # Wis Vak B volledig
     page.add_redact_annot(VAK_B, fill=(1, 1, 1))
     page.apply_redactions()
 
     y = VAK_B.y0 + 8
     for r in behoud:
-        # Gele achtergrond: tekst die niet op het voorblad gezet kon worden
+        if y + 10 > VAK_B.y1:
+            break
         page.draw_rect(
             fitz.Rect(VAK_B.x0 + 2, y - 7, VAK_B.x1 - 4, y + 2),
             color=None, fill=GEEL,
@@ -471,12 +655,12 @@ def process_volgblad(page: fitz.Page, afwijkingen: list = None) -> None:
         page.insert_text(fitz.Point(VAK_B.x0 + 4, y), r, fontsize=7, color=ZWART)
         y += 10
 
-    # Afwijkingen van het voorblad in rood onderaan Vak B
-    ROOD = (0.85, 0.1, 0.1)
+    # Afwijkingen van het voorblad in rood
+    ROOD       = (0.85, 0.1, 0.1)
     ROOD_LICHT = (1.0, 0.88, 0.88)
     for a in (afwijkingen or []):
         if y + 10 > VAK_B.y1:
-            break  # geen ruimte meer
+            break
         page.draw_rect(
             fitz.Rect(VAK_B.x0 + 2, y - 7, VAK_B.x1 - 4, y + 2),
             color=None, fill=ROOD_LICHT,
@@ -550,11 +734,13 @@ def bepaal_groep_spec(specs: list) -> dict:
         merged['profiel_type'] = 'aanslag'
 
     # Beglazing: meest voorkomende combinatie
-    glas_types     = [s['glas_type']          for s in specs if s.get('glas_type')]
-    glas_lagen_all = [tuple(s['glas_lagen'])   for s in specs if s.get('glas_lagen')]
+    glas_types     = [s['glas_type']        for s in specs if s.get('glas_type')]
+    glas_lagen_all = [tuple(s['glas_lagen']) for s in specs if s.get('glas_lagen')]
+    glas_strs      = [s['glas_str']         for s in specs if s.get('glas_str')]
     merged['glas_type']  = _meest_voorkomend(glas_types)
     merged['glas_lagen'] = list(_meest_voorkomend(glas_lagen_all)) if glas_lagen_all else None
-    merged['glas_str']   = '/'.join(_meest_voorkomend(glas_lagen_all)) if glas_lagen_all else None
+    # glas_str bewaart de volledige notatie incl. spouwbreedtes (bijv. '4/16/4/16/4')
+    merged['glas_str']   = _meest_voorkomend(glas_strs) if glas_strs else None
 
     # Afsluitbare kruk
     opendraaiend = [s for s in specs if s.get('is_opendraaiend')]
@@ -592,20 +778,48 @@ def zoek_afwijkingen(spec: dict, groep_spec: dict) -> list:
     return afwijkingen
 
 
+def verdeel_in_elementen(specs: list) -> list:
+    """Groepeert pagina-indices in logische elementen.
+
+    Een vervolgblad (is_vervolgblad=True) wordt aan het vorige hoofdblad
+    gekoppeld, zodat multi-pagina elementen (bijv. POS. 4.4A op pagina 4+5)
+    als één eenheid behandeld worden.
+
+    Retourneert lijst van dicts:
+      {'spec': <spec van hoofdblad>, 'paginas': [i, ...]}
+    """
+    elementen = []
+    huidig = None
+    for i, spec in enumerate(specs):
+        if spec.get('is_vervolgblad'):
+            if huidig is not None:
+                huidig['paginas'].append(i)
+            else:
+                # Eerste pagina is toch een vervolgblad (onverwacht) — zelfstandig
+                elementen.append({'spec': spec, 'paginas': [i]})
+        else:
+            huidig = {'spec': spec, 'paginas': [i]}
+            elementen.append(huidig)
+    return elementen
+
+
 def groepeer_volgbladen(specs: list) -> list:
     """Groepeert volgblad-specs in [ramen/kozijnen, deuren].
 
+    Houdt rekening met vervolgbladen: die worden bij het type van hun
+    hoofdblad gerekend.
+
     Retourneert lijst van (naam, [indices]) tuples.
-    Elementen waarvan het type niet herkend wordt gaan bij ramen.
     """
+    elementen  = verdeel_in_elementen(specs)
     ramen_idx  = []
     deuren_idx = []
-    for i, s in enumerate(specs):
-        et = s.get('element_type', '').lower()
+    for el in elementen:
+        et = el['spec'].get('element_type', '').lower()
         if 'deur' in et:
-            deuren_idx.append(i)
+            deuren_idx.extend(el['paginas'])
         else:
-            ramen_idx.append(i)  # ramen, kozijnen, onbekend → bij ramen
+            ramen_idx.extend(el['paginas'])   # kozijn, raam, onbekend → ramen
 
     groepen = []
     if ramen_idx:
@@ -615,11 +829,46 @@ def groepeer_volgbladen(specs: list) -> list:
     return groepen
 
 
+def schrijf_pm_maat(page: fitz.Page, breedte: int, hoogte: int) -> bool:
+    """Schrijft de productiemaat (breedte × hoogte) in Kolom A van het volgblad.
+
+    Zoekt het 'PM'-label op de pagina en plaatst de waarde rechts ervan op
+    dezelfde hoogte (y ≈ 235–248 pt in het standaard Opmeetfiche-formaat).
+    Retourneert True als het PM-label gevonden is.
+    """
+    pm_rects = page.search_for('PM')
+    # Filter: neem alleen de PM in Kolom A (x < 100)
+    pm_rects_links = [r for r in pm_rects if r.x0 < 100]
+    if not pm_rects_links:
+        return False
+
+    pm_r = pm_rects_links[0]
+    pm_y  = (pm_r.y0 + pm_r.y1) / 2   # verticaal midden van het PM-label
+
+    # Wis het bestaande 'x'-placeholder (dots + x-teken) rechts van PM
+    wis_rect = fitz.Rect(pm_r.x1, pm_r.y0 - 2, 240, pm_r.y1 + 2)
+    page.add_redact_annot(wis_rect, fill=(1, 1, 1))
+    page.apply_redactions()
+
+    # Schrijf de productiemaat: "980 x 2290"
+    maat_tekst = f'{breedte} x {hoogte}'
+    page.insert_text(
+        fitz.Point(pm_r.x1 + 3, pm_y + 3),
+        maat_tekst,
+        fontsize=8,
+        color=ZWART,
+    )
+    return True
+
+
 def verwerk_automatisch(volgbladen_pad: str, output_pad: str = None,
-                         maat_wijzigingen: dict = None) -> str:
+                         maat_wijzigingen: dict = None,
+                         pm_maaten: dict = None) -> str:
     """Verwerkt een PDF met alleen volgbladen en genereert automatisch de juiste voorbladen.
 
-    maat_wijzigingen: optioneel dict {pagina_index_in_volgbladen: {'breedte': 'oud=nieuw', 'hoogte': '...'}}
+    maat_wijzigingen: optioneel dict {pagina_index: {'breedte': 'oud=nieuw', 'hoogte': '...'}}
+    pm_maaten       : optioneel dict {pagina_index: {'breedte': int, 'hoogte': int}}
+                      schrijft PM-maat in Kolom A van elk hoofdblad
     """
     if output_pad is None:
         p = Path(volgbladen_pad)
@@ -631,14 +880,13 @@ def verwerk_automatisch(volgbladen_pad: str, output_pad: str = None,
     # Header extraheren uit de eerste volgblad
     header = extraheer_header_uit_volgblad(vb_doc[0])
 
-    # Alle volgbladen parsen
-    specs = [parse_volgblad(vb_doc[i]) for i in range(n)]
-
-    # Groeperen
-    groepen = groepeer_volgbladen(specs)
+    # Alle volgbladen parsen + elementen groeperen
+    specs     = [parse_volgblad(vb_doc[i]) for i in range(n)]
+    elementen = verdeel_in_elementen(specs)
+    groepen   = groepeer_volgbladen(specs)
 
     # Output-document opbouwen
-    result = fitz.open()   # leeg document
+    result = fitz.open()
 
     for groep_naam, groep_idx in groepen:
         groep_specs = [specs[i] for i in groep_idx]
@@ -648,31 +896,59 @@ def verwerk_automatisch(volgbladen_pad: str, output_pad: str = None,
         voorblad_doc = vul_voorblad(header, groep_spec)
         result.insert_pdf(voorblad_doc)
 
-        # Volgbladen verwerken en toevoegen
-        for i in groep_idx:
-            page = vb_doc[i]
+        # Bepaal elementen die tot deze groep behoren (op volgorde)
+        groep_idx_set = set(groep_idx)
+        groep_elementen = [
+            el for el in elementen
+            if el['paginas'][0] in groep_idx_set
+        ]
 
-            # Maataanpassingen (optioneel)
-            if maat_wijzigingen and i in maat_wijzigingen:
-                w = maat_wijzigingen[i]
+        for el in groep_elementen:
+            stuks          = el['spec'].get('stuks', 1)
+            hoofd_pagina_i = el['paginas'][0]
+            vervolg_idx    = el['paginas'][1:]   # evt. vervolgbladen
+
+            # Verzamel gefilterde tekst van vervolgbladen (worden NIET apart opgenomen)
+            extra_regels = []
+            for vi in vervolg_idx:
+                extra_regels.extend(extraheer_regels_vervolgblad(vb_doc[vi]))
+
+            # Verwerk het HOOFDBLAD
+            hoofd = vb_doc[hoofd_pagina_i]
+
+            # Maataanpassingen tekening (optioneel)
+            if maat_wijzigingen and hoofd_pagina_i in maat_wijzigingen:
+                w = maat_wijzigingen[hoofd_pagina_i]
                 for invoer, zone in ((w.get('breedte', ''), 'bottom'),
                                      (w.get('hoogte',  ''), 'right')):
                     if invoer and '=' in invoer:
                         try:
                             oud, nieuw = [int(x.strip()) for x in invoer.split('=', 1)]
-                            wijzig_maat_in_tekening(page, oud, nieuw, zone=zone)
+                            wijzig_maat_in_tekening(hoofd, oud, nieuw, zone=zone)
                         except ValueError:
                             pass
 
-            # Afwijkingen bepalen en in Vak B schrijven
-            afwijkingen = zoek_afwijkingen(specs[i], groep_spec)
-            process_volgblad(page, afwijkingen)
+            # PM-maat invullen
+            if pm_maaten and hoofd_pagina_i in pm_maaten:
+                pm = pm_maaten[hoofd_pagina_i]
+                b, ho = pm.get('breedte'), pm.get('hoogte')
+                if b and ho:
+                    schrijf_pm_maat(hoofd, int(b), int(ho))
 
-            # Volgblad toevoegen aan output
-            result.insert_pdf(vb_doc, from_page=i, to_page=i)
+            # Afwijkingen + Vak B opschonen + extra tekst van vervolgbladen
+            afwijkingen = zoek_afwijkingen(specs[hoofd_pagina_i], groep_spec)
+            process_volgblad(hoofd, afwijkingen, extra_regels=extra_regels)
+
+            # Voeg ALLEEN het hoofdblad toe (vervolgbladen worden weggelaten), stuks keer
+            for _ in range(stuks):
+                result.insert_pdf(vb_doc, from_page=hoofd_pagina_i, to_page=hoofd_pagina_i)
+
+    voeg_paginanummers_toe(result)
 
     result.save(output_pad)
-    print(f'✅ Opgeslagen: {output_pad}  ({len(groepen)} voorblad(en), {n} volgblad(en))')
+    n_volgbladen = sum(el['spec'].get('stuks', 1) for el in elementen
+                       if not el['spec'].get('is_vervolgblad'))
+    print(f'✅ Opgeslagen: {output_pad}  ({len(groepen)} voorblad(en), {n_volgbladen} volgblad(en))')
     return output_pad
 
 
