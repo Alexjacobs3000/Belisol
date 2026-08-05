@@ -1185,7 +1185,7 @@ def wijzig_maat_in_tekening(page: fitz.Page, oude_maat: int, nieuwe_maat: int,
         txt_img = Image.new('RGBA', (tw + pad * 2, th + pad * 2), (255, 255, 255, 0))
         td = ImageDraw.Draw(txt_img)
         td.text((-bb_new[0] + pad, -bb_new[1] + pad), new_str, fill='black', font=font)
-        txt_rot = txt_img.rotate(270, expand=True)   # 270° CCW = 90° CW
+        txt_rot = txt_img.rotate(90, expand=True)    # 90° CCW (tekst leest van onder naar boven)
 
         cx_orig = (x0 + x1) // 2
         cy_orig = (y0 + y1) // 2
