@@ -236,27 +236,10 @@ with left:
 
             st.divider()
 
-            # 5. Auto-genereren + download ────────────────────────────────────
+            # 5. Auto-genereren ───────────────────────────────────────────────
             pm_frozen   = tuple(sorted((k, d['breedte'], d['hoogte']) for k, d in pm_invoer.items()))
             maat_frozen = tuple(sorted((k, d['breedte'], d['hoogte']) for k, d in maat_invoer.items()))
             generated_bytes = _genereer(pdf_bytes, pm_frozen, maat_frozen)
-
-            n_vb  = len(groepen)
-            n_vlg = sum(
-                el['spec'].get('stuks', 1) for el in elementen
-                if not el['spec'].get('is_vervolgblad')
-            )
-            st.caption(f"{n_vb} voorblad(en) · {n_vlg} volgblad(en) · {len(generated_bytes) // 1024} KB")
-
-            output_naam = Path(uploaded.name).stem + "_ingevuld.pdf"
-            st.download_button(
-                label="⬇️ Download ingevuld PDF",
-                data=generated_bytes,
-                file_name=output_naam,
-                mime="application/pdf",
-                use_container_width=True,
-                type="primary",
-            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -264,14 +247,27 @@ with left:
 # ══════════════════════════════════════════════════════════════════════════════
 with right:
     if uploaded is not None and specs and generated_bytes is not None:
-        st.subheader("📄 Preview — Ingevuld PDF")
-
         pages   = _render_pages(generated_bytes)
         n_pages = len(pages)
         current = max(0, min(st.session_state.preview_page, n_pages - 1))
+        output_naam = Path(uploaded.name).stem + "_ingevuld.pdf"
+        pdf_b64 = base64.b64encode(generated_bytes).decode()
+
+        # Titelrij: label links, download rechts ───────────────────────────────
+        hdr1, hdr2 = st.columns([3, 2])
+        hdr1.subheader("📄 Preview — Ingevuld PDF")
+        hdr2.download_button(
+            label="⬇️ Download ingevuld PDF",
+            data=generated_bytes,
+            file_name=output_naam,
+            mime="application/pdf",
+            use_container_width=True,
+            type="primary",
+            key="dl_btn",
+        )
 
         # Navigatiebalk ────────────────────────────────────────────────────────
-        nav1, nav2, nav3, nav4 = st.columns([1, 1, 3, 1])
+        nav1, nav2, nav3, nav4 = st.columns([1, 1, 4, 1])
         if nav1.button("◀", key="prev_btn", use_container_width=True, disabled=(current == 0)):
             st.session_state.preview_page = current - 1
             st.rerun()
@@ -282,7 +278,6 @@ with right:
             f"<div style='padding-top:6px; color:#555;'>Pagina <b>{current + 1}</b> / {n_pages}</div>",
             unsafe_allow_html=True,
         )
-        pdf_b64 = base64.b64encode(generated_bytes).decode()
         nav4.markdown(
             f'<a href="data:application/pdf;base64,{pdf_b64}" target="_blank" rel="noopener" '
             f'style="display:block; text-align:center; padding:6px 0; background:#f0f2f6; '
@@ -304,22 +299,35 @@ with right:
                 if i == current:
                     st.markdown('</div>', unsafe_allow_html=True)
 
-        # Pijltjestoetsen ──────────────────────────────────────────────────────
+        # Pijltjestoetsen (keyboard) ───────────────────────────────────────────
         components.html(
-            """
+            f"""
             <script>
-            (function() {
-                function clickBtn(label) {
-                    var btns = window.parent.document.querySelectorAll('button');
-                    for (var b of btns) {
-                        if (b.textContent.trim() === label) { b.click(); return; }
-                    }
-                }
-                window.parent.document.addEventListener('keydown', function(e) {
-                    if (e.key === 'ArrowLeft')  clickBtn('◀');
-                    if (e.key === 'ArrowRight') clickBtn('▶');
-                });
-            })();
+            (function() {{
+                var doc = window.parent.document;
+
+                function clickKey(key) {{
+                    // Zoek de knop op basis van zijn unieke Streamlit-key attribuut
+                    var sel = 'button[data-testid="baseButton-secondary"]';
+                    var btns = doc.querySelectorAll(sel);
+                    for (var b of btns) {{
+                        var txt = b.innerText.replace(/\\s/g, '');
+                        if (key === 'left'  && txt === '◀') {{ b.click(); return; }}
+                        if (key === 'right' && txt === '▶') {{ b.click(); return; }}
+                    }}
+                }}
+
+                // Verwijder oude listener om dubbel-registratie te voorkomen
+                if (doc._arrowListener) {{
+                    doc.removeEventListener('keydown', doc._arrowListener);
+                }}
+                doc._arrowListener = function(e) {{
+                    if (e.target.tagName === 'INPUT') return;  // niet triggeren in tekstvelden
+                    if (e.key === 'ArrowLeft')  clickKey('left');
+                    if (e.key === 'ArrowRight') clickKey('right');
+                }};
+                doc.addEventListener('keydown', doc._arrowListener);
+            }})();
             </script>
             """,
             height=0,
