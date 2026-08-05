@@ -333,15 +333,28 @@ with left:
                 regels  = [r.strip() for r in doc_tmp[i].get_text("text").split("\n") if r.strip()]
                 label   = next((r for r in regels if r.startswith("POS.")), f"Volgblad {i+1}")
 
-                b_ph = str(breedte_hint) if breedte_hint else "breedte (mm)"
-                h_ph = str(hoogte_hint)  if hoogte_hint  else "hoogte (mm)"
+                b_ph = str(breedte_hint) if breedte_hint else "B (mm)"
+                h_ph = str(hoogte_hint)  if hoogte_hint  else "H (mm)"
 
                 cc1, cc2, cc3 = st.columns([3, 2, 2])
-                cc1.markdown(f"**{label}**")
-                b = cc2.text_input("B (mm)", key=f"pm_b_{i}", placeholder=b_ph,
-                                   label_visibility="collapsed")
-                h = cc3.text_input("H (mm)", key=f"pm_h_{i}", placeholder=h_ph,
-                                   label_visibility="collapsed")
+
+                # Commerciële maat tonen als subtekst onder de POS-label
+                comm_lbl = ""
+                if breedte_hint or hoogte_hint:
+                    comm_lbl = f"<span style='font-size:11px;color:#888'>commercieel: {breedte_hint or '?'} × {hoogte_hint or '?'} mm</span>"
+                cc1.markdown(f"**{label}**<br>{comm_lbl}", unsafe_allow_html=True)
+
+                b_val = st.session_state.get(f"pm_b_{i}", "")
+                h_val = st.session_state.get(f"pm_h_{i}", "")
+
+                # Kleur de labels groen als er een waarde ingevuld is
+                b_label = "✅ B (mm)" if b_val else "B (mm)"
+                h_label = "✅ H (mm)" if h_val else "H (mm)"
+
+                b = cc2.text_input(b_label, key=f"pm_b_{i}", placeholder=b_ph,
+                                   label_visibility="visible")
+                h = cc3.text_input(h_label, key=f"pm_h_{i}", placeholder=h_ph,
+                                   label_visibility="visible")
                 pm_invoer[i] = {"breedte": b.strip(), "hoogte": h.strip()}
 
             st.divider()

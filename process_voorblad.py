@@ -1131,33 +1131,67 @@ def wijzig_maat_in_tekening(page: fitz.Page, oude_maat: int, nieuwe_maat: int,
         return False
 
     x0, y0, x1, y1 = bbox
-    cx = (x0 + x1) // 2
-    target_w = x1 - x0
 
     # Pas font size aan zodat old_str even breed is als in template
     if not _MAAT_FONT:
         print('⚠️  Geen geschikt font gevonden — maataanpassing overgeslagen')
         return False
 
-    font_size = 10
-    for fs in range(10, 120):
-        font = ImageFont.truetype(_MAAT_FONT, fs)
-        bb = font.getbbox(old_str)
-        if bb[2] - bb[0] >= target_w:
-            font_size = fs
-            break
-    font = ImageFont.truetype(_MAAT_FONT, font_size)
+    if found_zone == 'bottom':
+        # Horizontale tekst: breedte-maat
+        target_w = x1 - x0
+        font_size = 10
+        for fs in range(10, 120):
+            font = ImageFont.truetype(_MAAT_FONT, fs)
+            bb = font.getbbox(old_str)
+            if bb[2] - bb[0] >= target_w:
+                font_size = fs
+                break
+        font = ImageFont.truetype(_MAAT_FONT, font_size)
 
-    draw = ImageDraw.Draw(img)
-    # Wis de oude maat (witte rechthoek met kleine marge)
-    draw.rectangle([x0 - 4, y0 - 4, x1 + 4, y1 + 4], fill='white')
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([x0 - 4, y0 - 4, x1 + 4, y1 + 4], fill='white')
 
-    # Schrijf nieuwe maat gecentreerd op dezelfde positie
-    bb_new = font.getbbox(new_str)
-    nw = bb_new[2] - bb_new[0]
-    tx = cx - nw // 2 - bb_new[0]
-    ty = y0 - bb_new[1]
-    draw.text((tx, ty), new_str, fill='black', font=font)
+        bb_new = font.getbbox(new_str)
+        nw = bb_new[2] - bb_new[0]
+        cx = (x0 + x1) // 2
+        tx = cx - nw // 2 - bb_new[0]
+        ty = y0 - bb_new[1]
+        draw.text((tx, ty), new_str, fill='black', font=font)
+
+    else:
+        # Geroteerde tekst (90° CW in origineel): hoogte-maat
+        # In het origineel is de tekst 90° met de klok mee gedraaid.
+        # De verticale span (y1-y0) = breedte van de tekst als je hem horizontaal leest.
+        target_w = y1 - y0
+        font_size = 10
+        for fs in range(10, 120):
+            font = ImageFont.truetype(_MAAT_FONT, fs)
+            bb = font.getbbox(old_str)
+            if bb[2] - bb[0] >= target_w:
+                font_size = fs
+                break
+        font = ImageFont.truetype(_MAAT_FONT, font_size)
+
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([x0 - 4, y0 - 4, x1 + 4, y1 + 4], fill='white')
+
+        # Teken nieuwe tekst horizontaal in een tijdelijk RGBA-beeld,
+        # roteer het 90° CW (= 270° CCW), plak op de juiste positie
+        bb_new = font.getbbox(new_str)
+        tw  = bb_new[2] - bb_new[0]
+        th  = bb_new[3] - bb_new[1]
+        pad = 2
+        txt_img = Image.new('RGBA', (tw + pad * 2, th + pad * 2), (255, 255, 255, 0))
+        td = ImageDraw.Draw(txt_img)
+        td.text((-bb_new[0] + pad, -bb_new[1] + pad), new_str, fill='black', font=font)
+        txt_rot = txt_img.rotate(270, expand=True)   # 270° CCW = 90° CW
+
+        cx_orig = (x0 + x1) // 2
+        cy_orig = (y0 + y1) // 2
+        paste_x = cx_orig - txt_rot.width  // 2
+        paste_y = cy_orig - txt_rot.height // 2
+        img.paste(txt_rot, (paste_x, paste_y), txt_rot)
 
     # Vervang de XObject direct — behoudt positie en transform exact
     out = io.BytesIO()
