@@ -380,6 +380,12 @@ with right:
             key="dl_btn",
         )
 
+        # Hoogte van één pagina uit de PNG-header lezen (bytes 20-24 = height uint32 BE)
+        import struct
+        _page_h = struct.unpack('>I', pages[0][20:24])[0]   # pixelhoogte van één pagina
+        _nav_h  = 42                                          # navigatiebalk
+        _component_h = _page_h + _nav_h + 6                  # iframe-hoogte
+
         # Zelfstandige HTML-preview met eigen navigatie + toetsenbord ─────────
         imgs_html = '\n'.join(
             f'<div class="pw" id="p{i}">'
@@ -400,7 +406,7 @@ with right:
             #nav button:disabled{{opacity:.35;cursor:default}}
             #nav button:hover:not(:disabled){{background:#dde}}
             #ind{{flex:1;text-align:center;color:#555;font-size:13px}}
-            #box{{height:700px;overflow-y:auto;border:1px solid #ddd;
+            #box{{height:{_page_h}px;overflow-y:auto;border:1px solid #ddd;
                   border-radius:6px;background:#f8f8f8;scroll-behavior:auto}}
             .pw{{margin:0 4px 6px;padding:3px;border-radius:4px;
                  transition:outline .1s}}
@@ -444,7 +450,7 @@ with right:
               upd();
             }};
             </script></body></html>""",
-            height=760,
+            height=_component_h,
             scrolling=False,
         )
 
