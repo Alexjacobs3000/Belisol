@@ -259,3 +259,24 @@ st.download_button(
     use_container_width=True,
     type="primary",
 )
+
+# ── 8. Preview ────────────────────────────────────────────────────────────────
+st.divider()
+st.subheader("👁 Preview")
+
+preview_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
+n_pages = len(preview_doc)
+
+for row_start in range(0, n_pages, 2):
+    cols = st.columns(2)
+    for ci in range(2):
+        pi = row_start + ci
+        if pi >= n_pages:
+            break
+        page = preview_doc[pi]
+        pix  = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+        cols[ci].image(
+            pix.tobytes("png"),
+            caption=f"P: {pi + 1}/{n_pages}",
+            use_container_width=True,
+        )
