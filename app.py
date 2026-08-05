@@ -1,23 +1,22 @@
 """
 Streamlit app — Voorbladen invullen (Belisol PVC CERTIX)
 
-Upload enkel de volgbladen-PDF. De app genereert automatisch de juiste voorbladen:
+Upload de volgbladen-PDF. De app genereert automatisch de juiste voorbladen:
   • Ramen / kozijnen → één voorblad
   • Deuren           → apart voorblad (indien aanwezig)
-Afwijkingen per element worden in rood vermeld in Vak B van het volgblad.
-Vervolgbladen worden automatisch gekoppeld aan hun hoofdblad.
-Stuks > 1 worden gedupliceerd in de output.
 
 Starten:
     streamlit run app.py
 """
 
+import base64
 import io
 import sys
 from pathlib import Path
 
 import fitz
 import streamlit as st
+import streamlit.components.v1 as components
 
 sys.path.insert(0, str(Path(__file__).parent))
 import process_voorblad as pv
@@ -26,256 +25,312 @@ import process_voorblad as pv
 st.set_page_config(
     page_title="Voorbladen invullen",
     page_icon="🏠",
-    layout="centered",
+    layout="wide",
 )
 
-st.title("🏠 Voorbladen invullen")
-st.caption("Belisol PVC CERTIX — upload de volgbladen, de app genereert automatisch de voorbladen")
-
-st.divider()
-
-# ── 1. PDF uploaden ───────────────────────────────────────────────────────────
-uploaded = st.file_uploader(
-    "Upload volgbladen PDF",
-    type="pdf",
-    help="PDF met alleen de volgbladen (technische fiches per element)",
-)
-
-if not uploaded:
-    st.stop()
-
-pdf_bytes = uploaded.getvalue()
+# ── Session state ──────────────────────────────────────────────────────────────
+for _k, _v in [('generated_bytes', None), ('preview_page', 0), ('last_upload_name', None)]:
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
 
 
-# ── 2. PDF parsen ─────────────────────────────────────────────────────────────
+# ── Gecachte helperfuncties (module-niveau) ────────────────────────────────────
 @st.cache_data(show_spinner="Volgbladen lezen…")
 def _parse(data: bytes):
     doc      = fitz.open(stream=data, filetype="pdf")
     header   = pv.extraheer_header_uit_volgblad(doc[0])
     specs    = [pv.parse_volgblad(doc[i]) for i in range(len(doc))]
-    elementen = pv.verdeel_in_elementen(specs)   # [{spec, paginas}]
+    elementen = pv.verdeel_in_elementen(specs)
     groepen   = pv.groepeer_volgbladen(specs)
     return header, specs, elementen, groepen
 
 
-header, specs, elementen, groepen = _parse(pdf_bytes)
+@st.cache_data(show_spinner=False)
+def _render_pages(data: bytes, scale: float = 1.3):
+    """Rendert alle pagina's van een PDF naar PNG-bytes (gecached)."""
+    doc = fitz.open(stream=data, filetype="pdf")
+    mat = fitz.Matrix(scale, scale)
+    return [doc[i].get_pixmap(matrix=mat).tobytes("png") for i in range(len(doc))]
 
-if not specs:
-    st.error("Geen volgbladen gevonden in dit PDF.")
-    st.stop()
 
-# ── 3. Samenvatting tonen ─────────────────────────────────────────────────────
-st.subheader("📋 Gevonden elementen")
+# ── Titel ─────────────────────────────────────────────────────────────────────
+st.title("🏠 Voorbladen invullen")
+st.caption("Belisol PVC CERTIX — upload de volgbladen, de app genereert automatisch de voorbladen")
 
-for groep_naam, groep_idx in groepen:
-    groep_idx_set = set(groep_idx)
-    groep_specs   = [specs[i] for i in groep_idx]
-    groep_spec    = pv.bepaal_groep_spec(groep_specs)
+# ── Twee kolommen ─────────────────────────────────────────────────────────────
+left, right = st.columns([2, 3], gap="large")
 
-    # Elementen die tot deze groep behoren (hoofdbladen)
-    groep_elementen = [
-        el for el in elementen if el['paginas'][0] in groep_idx_set
-    ]
+# ══════════════════════════════════════════════════════════════════════════════
+# LINKER KOLOM — controls
+# ══════════════════════════════════════════════════════════════════════════════
+with left:
+    st.divider()
 
-    n_stuks_totaal = sum(el['spec'].get('stuks', 1) for el in groep_elementen)
-
-    with st.expander(
-        f"**{groep_naam}** — {len(groep_elementen)} element(en), "
-        f"{n_stuks_totaal} stuk(s) totaal → 1 voorblad",
-        expanded=True,
-    ):
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Glas",    groep_spec.get("glas_str")    or "—")
-        col2.metric("Profiel", groep_spec.get("profiel_type") or "—")
-        col3.metric("Kleur kader", groep_spec.get("kader_buiten") or "—")
-
-        for el in groep_elementen:
-            i         = el['paginas'][0]   # hoofdblad index
-            stuks     = el['spec'].get('stuks', 1)
-            afw       = pv.zoek_afwijkingen(el['spec'], groep_spec)
-            et        = el['spec'].get('element_type', f'Volgblad {i+1}')
-            pos_match = __import__('re').search(
-                r'POS\.\s*[\d.]+[A-Z]?', specs[i].get('element_type', ''),
-            )
-            # Label ophalen uit pagina tekst
-            doc_tmp = fitz.open(stream=pdf_bytes, filetype="pdf")
-            regels  = [r.strip() for r in doc_tmp[i].get_text("text").split("\n") if r.strip()]
-            label   = next((r for r in regels if r.startswith("POS.")), f"Volgblad {i+1}")
-
-            label_met_stuks = f"{label}  ×{stuks}" if stuks > 1 else label
-            n_vervolgbladen = len(el['paginas']) - 1
-
-            if afw:
-                extra_lbl = f"  _(+{n_vervolgbladen} vervolgblad)_" if n_vervolgbladen else ""
-                afw_lijst = "\n".join(f"- {a}" for a in afw)
-                st.warning(f"⚠️ **{label_met_stuks}**{extra_lbl}\n\n{afw_lijst}")
-            else:
-                extra = f"  _(+{n_vervolgbladen} vervolgblad)_" if n_vervolgbladen else ""
-                st.caption(f"✓ {label_met_stuks} — conform voorblad{extra}")
-
-st.divider()
-
-# ── 4. PM-maaten invoeren ─────────────────────────────────────────────────────
-st.subheader("📐 Productiemaaten (PM)")
-st.caption(
-    "Vul de productiemaat in per element. "
-    "De offertemaat staat als hint. Leeg laten = niet invullen."
-)
-
-pm_invoer: dict[int, dict] = {}
-for el in elementen:
-    if el['spec'].get('is_vervolgblad'):
-        continue   # vervolgbladen krijgen geen PM-invoer
-
-    i            = el['paginas'][0]
-    breedte_hint = el['spec'].get('offer_breedte')
-    hoogte_hint  = el['spec'].get('offer_hoogte')
-
-    doc_tmp = fitz.open(stream=pdf_bytes, filetype="pdf")
-    regels  = [r.strip() for r in doc_tmp[i].get_text("text").split("\n") if r.strip()]
-    label   = next((r for r in regels if r.startswith("POS.")), f"Volgblad {i+1}")
-
-    b_placeholder = str(breedte_hint) if breedte_hint else "bijv. 980"
-    h_placeholder = str(hoogte_hint)  if hoogte_hint  else "bijv. 2290"
-
-    col1, col2, col3 = st.columns([3, 2, 2])
-    col1.markdown(f"**{label}**")
-    b = col2.text_input(
-        "Breedte (mm)", key=f"pm_b_{i}",
-        placeholder=b_placeholder, label_visibility="collapsed",
+    # 1. Upload ────────────────────────────────────────────────────────────────
+    uploaded = st.file_uploader(
+        "Upload volgbladen PDF",
+        type="pdf",
+        help="PDF met alleen de volgbladen (technische fiches per element)",
     )
-    h = col3.text_input(
-        "Hoogte (mm)", key=f"pm_h_{i}",
-        placeholder=h_placeholder, label_visibility="collapsed",
-    )
-    pm_invoer[i] = {"breedte": b.strip(), "hoogte": h.strip()}
 
-st.divider()
+    # Reset gegenereerde PDF bij nieuw bestand
+    if uploaded is not None:
+        if st.session_state.last_upload_name != uploaded.name:
+            st.session_state.generated_bytes = None
+            st.session_state.preview_page    = 0
+            st.session_state.last_upload_name = uploaded.name
+    else:
+        st.session_state.generated_bytes  = None
+        st.session_state.last_upload_name = None
 
-# ── 5. Optionele maataanpassingen tekening ────────────────────────────────────
-with st.expander("🔧 Maataanpassingen in tekeningen *(optioneel)*", expanded=False):
-    st.caption("Leeg laten = geen wijziging. Formaat: oud=nieuw  (bijv. 980=1080)")
-    maat_invoer: dict[int, dict] = {}
-    for el in elementen:
-        if el['spec'].get('is_vervolgblad'):
-            continue
-        i = el['paginas'][0]
-        doc_tmp = fitz.open(stream=pdf_bytes, filetype="pdf")
-        regels  = [r.strip() for r in doc_tmp[i].get_text("text").split("\n") if r.strip()]
-        label   = next((r for r in regels if r.startswith("POS.")), f"Volgblad {i+1}")
+    if uploaded is None:
+        st.info("Upload een PDF met volgbladen om te beginnen.")
 
-        col1, col2, col3 = st.columns([2, 2, 2])
-        col1.markdown(f"**{label}**")
-        b = col2.text_input("Breedte", key=f"b_{i}", placeholder="bijv. 980=1080",  label_visibility="collapsed")
-        h = col3.text_input("Hoogte",  key=f"h_{i}", placeholder="bijv. 2290=2390", label_visibility="collapsed")
-        maat_invoer[i] = {"breedte": b.strip(), "hoogte": h.strip()}
+    else:
+        pdf_bytes = uploaded.getvalue()
+        header, specs, elementen, groepen = _parse(pdf_bytes)
 
-st.divider()
+        if not specs:
+            st.error("Geen volgbladen gevonden in dit PDF.")
 
-# ── 6. Genereren ──────────────────────────────────────────────────────────────
-if not st.button("✅ Genereer voorbladen", type="primary", use_container_width=True):
-    st.stop()
+        else:
+            # 2. Samenvatting ──────────────────────────────────────────────────
+            st.subheader("📋 Gevonden elementen")
 
-with st.spinner("PDF wordt gegenereerd…"):
+            for groep_naam, groep_idx in groepen:
+                groep_idx_set   = set(groep_idx)
+                groep_specs     = [specs[i] for i in groep_idx]
+                groep_spec      = pv.bepaal_groep_spec(groep_specs)
+                groep_elementen = [el for el in elementen if el['paginas'][0] in groep_idx_set]
+                n_stuks_totaal  = sum(el['spec'].get('stuks', 1) for el in groep_elementen)
 
-    vb_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    result = fitz.open()
+                with st.expander(
+                    f"**{groep_naam}** — {len(groep_elementen)} element(en), "
+                    f"{n_stuks_totaal} stuk(s) totaal → 1 voorblad",
+                    expanded=True,
+                ):
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Glas",        groep_spec.get("glas_str")    or "—")
+                    c2.metric("Profiel",     groep_spec.get("profiel_type") or "—")
+                    c3.metric("Kleur kader", groep_spec.get("kader_buiten") or "—")
 
-    for groep_naam, groep_idx in groepen:
-        groep_idx_set   = set(groep_idx)
-        groep_specs     = [specs[i] for i in groep_idx]
-        groep_spec      = pv.bepaal_groep_spec(groep_specs)
-        groep_elementen = [el for el in elementen if el['paginas'][0] in groep_idx_set]
+                    for el in groep_elementen:
+                        i     = el['paginas'][0]
+                        stuks = el['spec'].get('stuks', 1)
+                        afw   = pv.zoek_afwijkingen(el['spec'], groep_spec)
 
-        # Voorblad genereren
-        voorblad_doc = pv.vul_voorblad(header, groep_spec)
-        result.insert_pdf(voorblad_doc)
+                        doc_tmp = fitz.open(stream=pdf_bytes, filetype="pdf")
+                        regels  = [r.strip() for r in doc_tmp[i].get_text("text").split("\n") if r.strip()]
+                        label   = next((r for r in regels if r.startswith("POS.")), f"Volgblad {i+1}")
 
-        for el in groep_elementen:
-            stuks       = el['spec'].get('stuks', 1)
-            hoofd_idx   = el['paginas'][0]
-            vervolg_idx = el['paginas'][1:]
+                        label_met_stuks = f"{label}  ×{stuks}" if stuks > 1 else label
+                        n_verv          = len(el['paginas']) - 1
 
-            # Verzamel gefilterde tekst van vervolgbladen
-            extra_regels = []
-            for vi in vervolg_idx:
-                extra_regels.extend(pv.extraheer_regels_vervolgblad(vb_doc[vi]))
+                        if afw:
+                            extra_lbl = f"  _(+{n_verv} vervolgblad)_" if n_verv else ""
+                            afw_lijst = "\n".join(f"- {a}" for a in afw)
+                            st.warning(f"⚠️ **{label_met_stuks}**{extra_lbl}\n\n{afw_lijst}")
+                        else:
+                            extra = f"  _(+{n_verv} vervolgblad)_" if n_verv else ""
+                            st.caption(f"✓ {label_met_stuks} — conform voorblad{extra}")
 
-            # Verwerk het HOOFDBLAD
-            hoofd = vb_doc[hoofd_idx]
+            st.divider()
 
-            # Maataanpassingen tekening
-            w = maat_invoer.get(hoofd_idx, {})
-            for invoer, zone in ((w.get("breedte", ""), "bottom"),
-                                 (w.get("hoogte",  ""), "right")):
-                if invoer and "=" in invoer:
-                    try:
-                        oud, nieuw = [int(x.strip()) for x in invoer.split("=", 1)]
-                        pv.wijzig_maat_in_tekening(hoofd, oud, nieuw, zone=zone)
-                    except ValueError:
-                        pass
+            # 3. PM-maaten ─────────────────────────────────────────────────────
+            st.subheader("📐 Productiemaaten (PM)")
+            st.caption("Leeg laten = niet invullen.")
 
-            # PM-maat invullen op het hoofdblad
-            pm = pm_invoer.get(hoofd_idx, {})
-            try:
-                b_pm = int(pm.get("breedte") or 0)
-                h_pm = int(pm.get("hoogte")  or 0)
-                if b_pm and h_pm:
-                    pv.schrijf_pm_maat(hoofd, b_pm, h_pm)
-            except ValueError:
-                pass
+            pm_invoer: dict[int, dict] = {}
+            for el in elementen:
+                if el['spec'].get('is_vervolgblad'):
+                    continue
+                i            = el['paginas'][0]
+                breedte_hint = el['spec'].get('offer_breedte')
+                hoogte_hint  = el['spec'].get('offer_hoogte')
 
-            # Afwijkingen + Vak B opschonen + extra tekst van vervolgbladen
-            afwijkingen = pv.zoek_afwijkingen(specs[hoofd_idx], groep_spec)
-            pv.process_volgblad(hoofd, afwijkingen, extra_regels=extra_regels)
+                doc_tmp = fitz.open(stream=pdf_bytes, filetype="pdf")
+                regels  = [r.strip() for r in doc_tmp[i].get_text("text").split("\n") if r.strip()]
+                label   = next((r for r in regels if r.startswith("POS.")), f"Volgblad {i+1}")
 
-            # Voeg ALLEEN het hoofdblad toe (stuks keer), vervolgbladen worden weggelaten
-            for _ in range(stuks):
-                result.insert_pdf(vb_doc, from_page=hoofd_idx, to_page=hoofd_idx)
+                b_ph = str(breedte_hint) if breedte_hint else "bijv. 980"
+                h_ph = str(hoogte_hint)  if hoogte_hint  else "bijv. 2290"
 
-    pv.voeg_paginanummers_toe(result)
+                cc1, cc2, cc3 = st.columns([3, 2, 2])
+                cc1.markdown(f"**{label}**")
+                b = cc2.text_input("Breedte", key=f"pm_b_{i}", placeholder=b_ph, label_visibility="collapsed")
+                h = cc3.text_input("Hoogte",  key=f"pm_h_{i}", placeholder=h_ph, label_visibility="collapsed")
+                pm_invoer[i] = {"breedte": b.strip(), "hoogte": h.strip()}
 
-    buf = io.BytesIO()
-    result.save(buf)
-    buf.seek(0)
+            # 4. Maataanpassingen (optioneel) ──────────────────────────────────
+            st.divider()
+            maat_invoer: dict[int, dict] = {}
+            with st.expander("🔧 Maataanpassingen in tekeningen *(optioneel)*", expanded=False):
+                st.caption("Leeg laten = geen wijziging. Formaat: oud=nieuw  (bijv. 980=1080)")
+                for el in elementen:
+                    if el['spec'].get('is_vervolgblad'):
+                        continue
+                    i = el['paginas'][0]
+                    doc_tmp = fitz.open(stream=pdf_bytes, filetype="pdf")
+                    regels  = [r.strip() for r in doc_tmp[i].get_text("text").split("\n") if r.strip()]
+                    label   = next((r for r in regels if r.startswith("POS.")), f"Volgblad {i+1}")
+                    cc1, cc2, cc3 = st.columns([2, 2, 2])
+                    cc1.markdown(f"**{label}**")
+                    b = cc2.text_input("Breedte", key=f"b_{i}",  placeholder="bijv. 980=1080",  label_visibility="collapsed")
+                    h = cc3.text_input("Hoogte",  key=f"h_{i}",  placeholder="bijv. 2290=2390", label_visibility="collapsed")
+                    maat_invoer[i] = {"breedte": b.strip(), "hoogte": h.strip()}
 
-# ── 7. Download ───────────────────────────────────────────────────────────────
-n_voorbladen     = len(groepen)
-totaal_volgbladen = sum(
-    el['spec'].get('stuks', 1) for el in elementen if not el['spec'].get('is_vervolgblad')
-)
-st.success(
-    f"✅ Klaar — {n_voorbladen} voorblad(en), "
-    f"{totaal_volgbladen} volgblad(en) in output"
-)
+            st.divider()
 
-output_naam = Path(uploaded.name).stem + "_ingevuld.pdf"
-st.download_button(
-    label="⬇️ Download ingevuld PDF",
-    data=buf,
-    file_name=output_naam,
-    mime="application/pdf",
-    use_container_width=True,
-    type="primary",
-)
+            # 5. Genereren ─────────────────────────────────────────────────────
+            if st.button("✅ Genereer voorbladen", type="primary", use_container_width=True):
+                with st.spinner("PDF wordt gegenereerd…"):
+                    vb_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                    result = fitz.open()
 
-# ── 8. Preview ────────────────────────────────────────────────────────────────
-st.divider()
-st.subheader("👁 Preview")
+                    for groep_naam, groep_idx in groepen:
+                        groep_idx_set   = set(groep_idx)
+                        groep_specs     = [specs[i] for i in groep_idx]
+                        groep_spec      = pv.bepaal_groep_spec(groep_specs)
+                        groep_elementen = [el for el in elementen if el['paginas'][0] in groep_idx_set]
 
-preview_doc = fitz.open(stream=buf.getvalue(), filetype="pdf")
-n_pages = len(preview_doc)
+                        voorblad_doc = pv.vul_voorblad(header, groep_spec)
+                        result.insert_pdf(voorblad_doc)
 
-for row_start in range(0, n_pages, 2):
-    cols = st.columns(2)
-    for ci in range(2):
-        pi = row_start + ci
-        if pi >= n_pages:
-            break
-        page = preview_doc[pi]
-        pix  = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
-        cols[ci].image(
-            pix.tobytes("png"),
-            caption=f"P: {pi + 1}/{n_pages}",
-            use_container_width=True,
+                        for el in groep_elementen:
+                            stuks       = el['spec'].get('stuks', 1)
+                            hoofd_idx   = el['paginas'][0]
+                            vervolg_idx = el['paginas'][1:]
+
+                            extra_regels = []
+                            for vi in vervolg_idx:
+                                extra_regels.extend(pv.extraheer_regels_vervolgblad(vb_doc[vi]))
+
+                            hoofd = vb_doc[hoofd_idx]
+
+                            w = maat_invoer.get(hoofd_idx, {})
+                            for invoer, zone in ((w.get("breedte", ""), "bottom"),
+                                                 (w.get("hoogte",  ""), "right")):
+                                if invoer and "=" in invoer:
+                                    try:
+                                        oud, nieuw = [int(x.strip()) for x in invoer.split("=", 1)]
+                                        pv.wijzig_maat_in_tekening(hoofd, oud, nieuw, zone=zone)
+                                    except ValueError:
+                                        pass
+
+                            pm = pm_invoer.get(hoofd_idx, {})
+                            try:
+                                b_pm = int(pm.get("breedte") or 0)
+                                h_pm = int(pm.get("hoogte")  or 0)
+                                if b_pm and h_pm:
+                                    pv.schrijf_pm_maat(hoofd, b_pm, h_pm)
+                            except ValueError:
+                                pass
+
+                            afwijkingen = pv.zoek_afwijkingen(specs[hoofd_idx], groep_spec)
+                            pv.process_volgblad(hoofd, afwijkingen, extra_regels=extra_regels)
+
+                            for _ in range(stuks):
+                                result.insert_pdf(vb_doc, from_page=hoofd_idx, to_page=hoofd_idx)
+
+                    pv.voeg_paginanummers_toe(result)
+
+                    buf = io.BytesIO()
+                    result.save(buf)
+                    st.session_state.generated_bytes = buf.getvalue()
+                    st.session_state.preview_page    = 0
+
+            # 6. Download ──────────────────────────────────────────────────────
+            if st.session_state.generated_bytes:
+                n_vb   = len(groepen)
+                n_vlg  = sum(
+                    el['spec'].get('stuks', 1) for el in elementen
+                    if not el['spec'].get('is_vervolgblad')
+                )
+                st.success(f"✅ Klaar — {n_vb} voorblad(en), {n_vlg} volgblad(en) in output")
+                output_naam = Path(uploaded.name).stem + "_ingevuld.pdf"
+                st.download_button(
+                    label="⬇️ Download ingevuld PDF",
+                    data=st.session_state.generated_bytes,
+                    file_name=output_naam,
+                    mime="application/pdf",
+                    use_container_width=True,
+                    type="primary",
+                )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RECHTER KOLOM — live preview
+# ══════════════════════════════════════════════════════════════════════════════
+with right:
+    if uploaded is not None:
+        # Toon gegenereerde PDF zodra beschikbaar, anders de upload
+        is_generated   = st.session_state.generated_bytes is not None
+        preview_bytes  = st.session_state.generated_bytes if is_generated else uploaded.getvalue()
+        preview_label  = "📄 Preview — Ingevuld PDF" if is_generated else "📄 Preview — Volgbladen"
+
+        st.subheader(preview_label)
+
+        # Render pagina's (gecached op basis van bytes)
+        pages   = _render_pages(preview_bytes)
+        n_pages = len(pages)
+        current = max(0, min(st.session_state.preview_page, n_pages - 1))
+
+        # Navigatiebalk ────────────────────────────────────────────────────────
+        nav1, nav2, nav3, nav4 = st.columns([1, 1, 3, 1])
+        if nav1.button("◀", key="prev_btn", use_container_width=True, disabled=(current == 0)):
+            st.session_state.preview_page = current - 1
+            st.rerun()
+        if nav2.button("▶", key="next_btn", use_container_width=True, disabled=(current == n_pages - 1)):
+            st.session_state.preview_page = current + 1
+            st.rerun()
+        nav3.markdown(
+            f"<div style='padding-top:6px; color:#555;'>Pagina <b>{current + 1}</b> / {n_pages}</div>",
+            unsafe_allow_html=True,
+        )
+        # Volledig scherm: open PDF in nieuw tabblad (native browser PDF viewer)
+        pdf_b64 = base64.b64encode(preview_bytes).decode()
+        nav4.markdown(
+            f'<a href="data:application/pdf;base64,{pdf_b64}" target="_blank" rel="noopener" '
+            f'style="display:block; text-align:center; padding:6px 0; background:#f0f2f6; '
+            f'border-radius:6px; text-decoration:none; color:#333; font-size:16px;" '
+            f'title="Openen in nieuw tabblad">⛶</a>',
+            unsafe_allow_html=True,
+        )
+
+        # Scrollbare container met alle pagina's ──────────────────────────────
+        with st.container(height=780, border=True):
+            for i, img_bytes in enumerate(pages):
+                if i == current:
+                    # Markeer de huidige pagina met een blauwe rand
+                    st.markdown(
+                        '<div style="outline:3px solid #1f77b4; border-radius:4px; '
+                        'margin-bottom:6px; padding:2px;">',
+                        unsafe_allow_html=True,
+                    )
+                st.image(img_bytes, caption=f"P: {i + 1} / {n_pages}", use_container_width=True)
+                if i == current:
+                    st.markdown('</div>', unsafe_allow_html=True)
+
+        # JavaScript: pijltjestoetsen ◀/▶ ────────────────────────────────────
+        components.html(
+            """
+            <script>
+            (function() {
+                function clickButton(label) {
+                    var btns = window.parent.document.querySelectorAll('button[kind="secondary"]');
+                    for (var btn of btns) {
+                        if (btn.textContent.trim() === label) {
+                            btn.click();
+                            return;
+                        }
+                    }
+                }
+                window.parent.document.addEventListener('keydown', function(e) {
+                    if (e.key === 'ArrowLeft')  clickButton('◀');
+                    if (e.key === 'ArrowRight') clickButton('▶');
+                });
+            })();
+            </script>
+            """,
+            height=0,
         )
