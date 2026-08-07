@@ -87,7 +87,7 @@ def _genereer(pdf_bytes: bytes, pm_frozen: tuple, afw_acties_frozen: tuple = ())
 
             hoofd = vb_doc[hoofd_idx]
 
-            # PM-maaten + maatvervanging in tekening (gecombineerd)
+            # PM-maaten: schrijf in Vak A + herteken tekening als vector
             pm = pm_invoer.get(hoofd_idx, {})
             try:
                 b_pm = int(pm.get('breedte') or 0)
@@ -96,22 +96,13 @@ def _genereer(pdf_bytes: bytes, pm_frozen: tuple, afw_acties_frozen: tuple = ())
                 b_pm = h_pm = 0
 
             if b_pm and h_pm:
+                # Vak A: PM-maat als tekst op de volgblad-pagina
                 pv.schrijf_pm_maat(hoofd, b_pm, h_pm)
-
-                # Vervang offer-maat door PM-maat in tekening (alleen als afwijkend)
-                spec = specs[hoofd_idx]
-                b_oud = spec.get('offer_breedte')
-                h_oud = spec.get('offer_hoogte')
-                if b_oud and b_pm != b_oud:
-                    try:
-                        pv.wijzig_maat_in_tekening(hoofd, int(b_oud), b_pm, zone='bottom')
-                    except Exception:
-                        pass
-                if h_oud and h_pm != h_oud:
-                    try:
-                        pv.wijzig_maat_in_tekening(hoofd, int(h_oud), h_pm, zone='right')
-                    except Exception:
-                        pass
+                # Tekening: vervang rasterafbeelding door vectorversie met PM-maten
+                try:
+                    pv.herteken_als_vector(hoofd, b_pm, h_pm)
+                except Exception:
+                    pass
 
             # Afwijkingen bepalen + acties toepassen
             afwijkingen_raw = pv.zoek_afwijkingen(specs[hoofd_idx], groep_spec)

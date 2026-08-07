@@ -1083,6 +1083,176 @@ def _zoek_getal_bbox(arr, getal_str, zone='bottom'):
         return (orig_x0, orig_y0, orig_x1, orig_y1)
 
 
+def herteken_als_vector(page: fitz.Page,
+                        breedte_pm: int = None,
+                        hoogte_pm:  int = None) -> bool:
+    """Analyseert de ingebedde rasterafbeelding, detecteert de tekenstructuur
+    (frame, verdelers, glasvlakken, maatzone), bedekt de rasterafbeelding met
+    een witte achtergrond en vervangt ze door een schone vectortekening.
+
+    breedte_pm / hoogte_pm: productiemaaten in mm. Worden als tekst in de
+    maatzone van de tekening geplaatst. Als None wordt de ruimte leeg gelaten.
+
+    Voordelen t.o.v. pixel-vervangen:
+    - Werkt ongeacht de originele afbeeldingsresolutie of fontgrootte
+    - Geen rotatieproblemen voor de hoogte-maat
+    - Herkenbare, consistente weergave voor alle volgbladen
+
+    Retourneert True als de bewerking geslaagd is.
+    """
+    if not _PIL_BESCHIKBAAR:
+        return False
+
+    imgs = page.get_images(full=True)
+    if not imgs:
+        return False
+
+    doc  = page.parent
+    best = max(imgs, key=lambda i: i[2] * i[3])
+    xref = best[0]
+    raw  = doc.extract_image(xref)
+    img  = Image.open(io.BytesIO(raw['image'])).convert('RGB')
+    arr  = np.array(img)
+    img_h, img_w = arr.shape[:2]
+
+    # ── Structuurdetectie via sterke lijnen ──────────────────────────────────
+    dark     = (arr < 100).any(axis=2)
+    row_sums = dark.sum(axis=1)
+    col_sums = dark.sum(axis=0)
+
+    # Sla de randen van de afbeelding zelf over (pixels 0-2 en img_h-3 enz.)
+    EDGE = 3
+    h_lines = sorted(i for i, s in enumerate(row_sums)
+                     if s > img_w * 0.40 and EDGE <= i <= img_h - EDGE)
+    v_lines = sorted(j for j, s in enumerate(col_sums)
+                     if s > img_h * 0.40 and EDGE <= j <= img_w - EDGE)
+
+    if not h_lines or not v_lines:
+        return False
+
+    frame_top    = h_lines[0]
+    frame_bottom = max(l for l in h_lines if l < img_h * 0.95)
+    frame_left   = v_lines[0]
+    frame_right  = max(l for l in v_lines if l < img_w * 0.95)
+
+    # Gebruik 10% marge zodat de framerand-lijnen (binnen-/buitenrand kozijn)
+    # niet als interne verdeler worden herkend.
+    fw = frame_right - frame_left
+    fh = frame_bottom - frame_top
+    mv = max(5, int(fw * 0.10))
+    mh = max(5, int(fh * 0.10))
+    inner_v = sorted(set(v for v in v_lines if frame_left + mv < v < frame_right - mv))
+    inner_h = sorted(set(l for l in h_lines if frame_top  + mh < l < frame_bottom - mh))
+
+    # ── PDF-positie van de afbeelding ────────────────────────────────────────
+    img_rects = page.get_image_rects(xref)
+    if not img_rects:
+        return False
+    # Neem de grootste rect (hetzelfde xref kan als logo-thumbnail én als tekening voorkomen)
+    img_rect = max(img_rects, key=lambda r: r.width * r.height)
+
+    # Schaalfactoren: pixels → PDF-punten
+    sx = img_rect.width  / img_w
+    sy = img_rect.height / img_h
+
+    def to_pt(px, py):
+        return fitz.Point(img_rect.x0 + px * sx, img_rect.y0 + py * sy)
+
+    def to_rect(x0, y0, x1, y1):
+        return fitz.Rect(
+            img_rect.x0 + x0 * sx, img_rect.y0 + y0 * sy,
+            img_rect.x0 + x1 * sx, img_rect.y0 + y1 * sy,
+        )
+
+    # ── Bedek originele afbeelding met wit ───────────────────────────────────
+    page.draw_rect(img_rect, color=None, fill=(1, 1, 1))
+
+    # ── Kleuren ──────────────────────────────────────────────────────────────
+    ZWART     = (0.0, 0.0, 0.0)
+    GLAS_FILL = (0.86, 0.93, 1.00)
+    GLAS_LIJN = (0.55, 0.76, 0.98)
+
+    fl, ft, fr, fb = frame_left, frame_top, frame_right, frame_bottom
+    kd = min(fr - fl, fb - ft) * 0.045   # kozijn-dikte (4.5% van kleinste dim)
+
+    # ── Glazen vakken ─────────────────────────────────────────────────────────
+    x_gren = [fl] + inner_v + [fr]
+    y_gren = [ft] + inner_h + [fb]
+    for xi in range(len(x_gren) - 1):
+        for yi in range(len(y_gren) - 1):
+            glas = to_rect(
+                x_gren[xi] + kd,   y_gren[yi] + kd,
+                x_gren[xi+1] - kd, y_gren[yi+1] - kd,
+            )
+            page.draw_rect(glas, color=GLAS_LIJN, fill=GLAS_FILL, width=0.3)
+
+    # ── Kozijn (buitenframe) ──────────────────────────────────────────────────
+    page.draw_rect(to_rect(fl, ft, fr, fb), color=ZWART, fill=None, width=2.2)
+
+    # ── Interne verdelers ─────────────────────────────────────────────────────
+    for v in inner_v:
+        page.draw_line(to_pt(v - kd / 2, ft + kd), to_pt(v - kd / 2, fb - kd),
+                       color=ZWART, width=1.6)
+        page.draw_line(to_pt(v + kd / 2, ft + kd), to_pt(v + kd / 2, fb - kd),
+                       color=ZWART, width=1.6)
+    for l in inner_h:
+        page.draw_line(to_pt(fl + kd, l - kd / 2), to_pt(fr - kd, l - kd / 2),
+                       color=ZWART, width=1.6)
+        page.draw_line(to_pt(fl + kd, l + kd / 2), to_pt(fr - kd, l + kd / 2),
+                       color=ZWART, width=1.6)
+
+    # ── Maatlijnen en tekst ───────────────────────────────────────────────────
+    PIJL = 4   # lengte pijlstreepje in PDF-punten
+
+    # Breedte (onder het frame)
+    maat_y  = img_rect.y0 + (fb + (img_h - fb) * 0.5) * sy
+    x_maat_l = img_rect.x0 + fl * sx
+    x_maat_r = img_rect.x0 + fr * sx
+    x_maat_c = (x_maat_l + x_maat_r) / 2
+
+    page.draw_line(fitz.Point(x_maat_l, maat_y),
+                   fitz.Point(x_maat_r, maat_y), color=ZWART, width=0.5)
+    page.draw_line(fitz.Point(x_maat_l, maat_y - PIJL),
+                   fitz.Point(x_maat_l, maat_y + PIJL), color=ZWART, width=0.5)
+    page.draw_line(fitz.Point(x_maat_r, maat_y - PIJL),
+                   fitz.Point(x_maat_r, maat_y + PIJL), color=ZWART, width=0.5)
+
+    if breedte_pm:
+        bstr = str(breedte_pm)
+        breedte_pt = x_maat_r - x_maat_l
+        # Cap op 9 zodat insert_textbox voldoende hoogte heeft (≥ fontsize * 1.7)
+        fs_b = max(4, min(9, int(breedte_pt / max(len(bstr), 1) * 0.45)))
+        page.insert_textbox(
+            fitz.Rect(x_maat_l, maat_y - 22, x_maat_r, maat_y + 4),
+            bstr, fontsize=fs_b, align=fitz.TEXT_ALIGN_CENTER,
+        )
+
+    # Hoogte (rechts van het frame)
+    maat_x  = img_rect.x0 + (fr + (img_w - fr) * 0.5) * sx
+    y_maat_t = img_rect.y0 + ft * sy
+    y_maat_b = img_rect.y0 + fb * sy
+
+    page.draw_line(fitz.Point(maat_x, y_maat_t),
+                   fitz.Point(maat_x, y_maat_b), color=ZWART, width=0.5)
+    page.draw_line(fitz.Point(maat_x - PIJL, y_maat_t),
+                   fitz.Point(maat_x + PIJL, y_maat_t), color=ZWART, width=0.5)
+    page.draw_line(fitz.Point(maat_x - PIJL, y_maat_b),
+                   fitz.Point(maat_x + PIJL, y_maat_b), color=ZWART, width=0.5)
+
+    if hoogte_pm:
+        hstr = str(hoogte_pm)
+        hoogte_pt = y_maat_b - y_maat_t
+        fs_h = max(4, min(9, int(hoogte_pt / max(len(hstr), 1) * 0.45)))
+        # rotate=90 → tekst loopt van onder naar boven (standaard voor hoogte-maat)
+        # Brede box zodat insert_textbox voldoende ruimte heeft
+        page.insert_textbox(
+            fitz.Rect(maat_x - 2, y_maat_t, maat_x + 24, y_maat_b),
+            hstr, fontsize=fs_h, align=fitz.TEXT_ALIGN_CENTER, rotate=90,
+        )
+
+    return True
+
+
 def wijzig_maat_in_tekening(page: fitz.Page, oude_maat: int, nieuwe_maat: int,
                              zone: str = 'auto') -> bool:
     """Vervangt een maataanduiding in de ingebedde tekening op een volgblad.
